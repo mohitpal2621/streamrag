@@ -69,21 +69,3 @@ export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: 
     client.release();
   }
 }
-
-export async function search(db: pg.Pool, query: string, limit: number) {
-  const { rows } = await db.query<{ title: string; source: string; feed: string; url: string | null; snippet: string }>(
-    // Rank in the inner query; ts_headline is slow, so it only runs on the rows that survive the limit.
-    `select title, source, feed, url,
-            ts_headline('english', body, q, 'StartSel=**, StopSel=**, MaxFragments=1, MaxWords=30, MinWords=12') as snippet
-     from (
-       select title, source, feed, url, body, q, ts_rank_cd(tsv, q) as rank
-       from documents, websearch_to_tsquery('english', $1) q
-       where closed_at is null and tsv @@ q
-       order by rank desc
-       limit $2
-     ) top
-     order by rank desc`,
-    [query, limit],
-  );
-  return rows;
-}

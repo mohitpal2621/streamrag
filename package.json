@@ -12,10 +12,12 @@
     "ingest": "node src/cli.ts ingest",
     "search": "node src/cli.ts search",
     "track": "node src/cli.ts track",
+    "eval": "node src/eval.ts",
     "typecheck": "tsc",
     "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
     "fast-xml-parser": "^5.11.2",
     "pg": "^8.23.1"
   },
