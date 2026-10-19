@@ -16,6 +16,8 @@ Everything runs on free, open-source tools, including the models. Answers come f
 - Answers with citations. `npm run ask` streams an answer written from the top six search results and lists the sources it cites.
 - An LLM gateway with retries, fallback across providers, a circuit breaker and per-minute rate limits. Every model call is logged, and `npm run usage` sums them up.
 - A semantic cache. The same question asked again, even lightly reworded, gets the earlier answer back in under a second, as long as the documents it cites haven't changed.
+- What breaks when you upgrade. `npm run upgrade -- express 4.21.0 5.0.0` reads the release notes of every major and minor release in between, has the model pull out the breaking changes as JSON, and stores them, so a release is only read once.
+- An LLM eval with promptfoo that scores the model on both jobs: cited answers and reading breaking changes out of release notes.
 
 ## Quick start
 
@@ -29,9 +31,11 @@ npm run ingest                            # sync, then embed what changed
 npm run search -- "how do teams avoid cache stampedes"
 ollama pull llama3.2:3b                   # the default answer model, about 2 GB
 npm run ask -- "how does Cloudflare D1 scale to millions of databases?"
+npm run upgrade -- express 4.21.0 5.0.0   # what breaks between two versions
 npm run usage                             # model calls, errors, latency and tokens
 npm run track -- ../my-app/package.json   # then run npm run ingest again
 npm run eval                              # score every search mode
+npm run eval:llm                          # score the model with promptfoo
 ```
 
 The first `ingest` downloads two small models (about 56 MB, kept in `node_modules`) and embeds every document once. For the default sources that's about 15,000 chunks, which took around half an hour on a 2-core machine and goes faster with more cores. After that, each run only embeds what changed.
@@ -72,6 +76,15 @@ On 2 CPU cores with no GPU, Llama 3.2 3B took about a minute per answer, around 
 
 Gemini and Groq keys are free to create. Leave billing off on both accounts and they can't charge you. When a free quota runs out, the gateway moves on to the next provider. Google may use what you send to the free Gemini API to improve its products, which is fine for public blog posts but worth knowing.
 
+## What breaks when you upgrade
+
+1. npm supplies the version list and the GitHub repo. The releases to read are the stable majors and minors after the version you're on, up to the one you name (the latest by default). Patch releases are skipped: semver keeps breaking changes out of them, and a big project ships dozens.
+2. Release notes come from the repo's releases feed, which carries the newest ten, and older ones from GitHub's API by tag (`v5.0.0`, `5.0.0` or `express@5.0.0`). Without a token the API allows 60 requests an hour, which goes a long way since each release is fetched once; a `GITHUB_TOKEN` raises the limit. Fetched notes are ordinary documents, so the next `ingest` makes them searchable too.
+3. The model reads the notes in pieces of up to 4,000 characters, cut between lines, with link targets stripped, since commit URLs are most of the tokens in a changelog. It has to answer with JSON in a fixed schema, `{"breaking": [{"change", "migration"}]}`. Ollama, Gemini, Groq and llama.cpp constrain their output to the schema, the reply gets checked anyway, and one that doesn't parse gets a single retry.
+4. The results go into `breaking_changes`, and `extracted_hash` records which version of the notes they came from, the same way `embedded_hash` works for chunks. Edited notes get read again, and nothing else is ever sent to a model twice.
+
+Notes that only point to a changelog file are flagged as too short to judge. Projects that spread a major's breaking changes over its betas only get what the final release's notes say; Express 5 is one of them.
+
 ## Eval
 
 `npm run eval` starts its own Postgres in Docker, pulls the current OSV advisories for 40 popular npm packages, embeds them, and asks 56 questions in every mode. The questions are written the way a developer would ask them, mostly without the advisory's own wording, and each lists the advisories that answer it. A few are bare CVE IDs, which keyword search is good at and embeddings are not.
@@ -98,30 +111,32 @@ Two changes the eval decided:
 
 ```
 src/
-  core/         storage, sync, chunking, embedding, search and answers (Postgres + pgvector)
+  core/         storage, sync, chunking, embedding, search, answers and extraction (Postgres + pgvector)
   connectors/   one file per source type: rss, hackernews, osv
   llm/          the gateway, a streaming client for OpenAI-compatible APIs, provider settings
   track.ts      turns a package.json into sources
+  upgrade.ts    finds the releases an upgrade crosses and their notes
   cli.ts
   eval.ts       the retrieval eval
 db/schema.sql
 eval/queries.json
+eval/llm/       the promptfoo eval, with its own package.json
 ```
 
 - Every source lands in one `documents` table, keyed by `(source, feed, external_id)`. Retrieval works on a `chunks` table.
 - A sync is one batch upsert (`unnest` + `ON CONFLICT`) in one transaction. `now()` is fixed for the whole transaction, so the rows the sync touched show up as `= now()`, and a snapshot sync closes everything else in that same transaction.
-- `embedded_hash` records which version of a document its chunks came from, so changed documents get picked up again and nothing else does.
+- `embedded_hash` records which version of a document its chunks came from, so changed documents get picked up again and nothing else does. `extracted_hash` does the same for breaking changes.
 - Vector search uses pgvector 0.8's iterative index scans, so filtering out closed documents can't leave a result list short.
 - The cache is a table too. Each row of `answers` keeps the question's embedding (HNSW-indexed), the numbered sources with their content hashes, and which of them the answer cited.
 - Ollama, Gemini and Groq all offer an OpenAI-compatible chat API, so one small client (`fetch` plus a server-sent events parser) covers all three without an SDK.
 - Fetching is polite: one request a second, an identifying User-Agent, public endpoints only.
-- The tests run against a real Postgres through Testcontainers, locally and in GitHub Actions, with stand-in models and a scripted gateway, so CI downloads nothing and calls no model.
+- The tests run against a real Postgres through Testcontainers, locally and in GitHub Actions, with stand-in models, a scripted gateway and faked npm and GitHub responses, so CI downloads nothing and calls no model.
 
 ## Roadmap
 
 1. Core sync, full-text search, RSS, Hacker News and the dependency radar (done)
 2. Embeddings with pgvector, hybrid keyword + vector search, reranking, and an eval set that measures retrieval quality (done)
-3. LLM layer: a gateway across local Ollama, Gemini and Groq with rate limits, retries, fallback and a circuit breaker, a semantic cache, and streamed answers with citations (done). Still to come: pulling breaking changes out of release notes as structured data, for questions like "what breaks if I upgrade Next.js?", and an answer-quality eval with promptfoo
+3. LLM layer: a gateway across local Ollama, Gemini and Groq with rate limits, retries, fallback and a circuit breaker, a semantic cache, streamed answers with citations, breaking changes pulled out of release notes as JSON, and a promptfoo eval (done)
 4. Event pipeline: Kafka (Redpanda) with Hacker News as the live stream, the outbox pattern, idempotent consumers, a dead-letter topic, BullMQ schedules and Redis locks
 5. Media connector: FFmpeg and Whisper turn dev podcasts and conference talks into timestamped, searchable text, and answers link to the exact moment
 6. APIs: GraphQL, streamed answers, a LangGraph agent and an MCP server, so coding assistants can ask about your dependencies
