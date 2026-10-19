@@ -62,7 +62,10 @@ export async function search(db: pg.Pool, query: string, opts: { mode: Mode; lim
     client.release();
   }
 
-  if (opts.mode === 'rerank' && chunks.length) {
+  // The cross-encoder was trained on questions, and the eval showed it pushing exact matches for a
+  // bare identifier (CVE-2025-29927, v16.4.2) out of the top 10, so those keep the hybrid order.
+  const isIdentifier = /^\S*\d\S*$/.test(query.trim());
+  if (opts.mode === 'rerank' && chunks.length && !isIdentifier) {
     const pool = chunks.slice(0, RERANK_POOL);
     const scores = await opts.rerank(query, pool.map((c) => c.text));
     chunks = pool.map((c, i) => ({ ...c, score: scores[i] })).sort((a, b) => b.score - a.score);

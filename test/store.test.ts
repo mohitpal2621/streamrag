@@ -111,6 +111,12 @@ describe('embedding and search', () => {
     assert.deepEqual(await find('database tuning', 'rerank'), ['Vacuum settings', 'Tuning checklist', 'Consumer groups']);
   });
 
+  test('a bare identifier keeps the hybrid order instead of the reranker’s', async () => {
+    await syncFeed(db, 'kb', 'advisories', [doc('cve', 'fixes CVE-2025-1234 in the parser', 'Advisory')]);
+    await embedPending(db, fakeEmbed);
+    assert.equal((await find('CVE-2025-1234', 'rerank'))[0], 'Advisory');
+  });
+
   test('a long document shows up once, and closed documents not at all', async () => {
     const long = `postgres ${'word '.repeat(450)}`;
     await syncFeed(db, 'kb', 'notes', [doc('long', long, 'Long postgres guide'), doc('kafka', 'kafka consumer groups and partitions', 'Consumer groups')]);
