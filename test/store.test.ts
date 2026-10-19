@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { ask, type AnswerEvent } from '../src/core/answer.ts';
 import { embedPending } from '../src/core/embed.ts';
 import { ingest } from '../src/core/ingest.ts';
 import type { Embed, Rerank } from '../src/core/models.ts';
 import { search } from '../src/core/search.ts';
 import { connect, migrate, syncFeed, type Doc } from '../src/core/store.ts';
+import type { Message } from '../src/llm/openai.ts';
 
 let container: StartedPostgreSqlContainer;
 let db: ReturnType<typeof connect>;
@@ -113,6 +115,53 @@ describe('embedding and search', () => {
     await syncFeed(db, 'kb', 'advisories', [doc('cve', 'fixes CVE-2025-1234 in the parser', 'Advisory')]);
     await embedPending(db, fakeEmbed);
     assert.equal((await find('CVE-2025-1234', 'rerank'))[0], 'Advisory');
+  });
+
+  // Answers with a fixed reply, one word per token, and counts how often it is asked.
+  const fakeGateway = (reply: string) => {
+    const gateway = {
+      calls: 0,
+      async *stream(_messages: Message[]) {
+        gateway.calls++;
+        for (const word of reply.split(' ')) yield { provider: 'fake', text: `${word} ` };
+      },
+    };
+    return gateway;
+  };
+  const askAll = async (question: string, gateway: ReturnType<typeof fakeGateway>) => {
+    const events: AnswerEvent[] = [];
+    for await (const ev of ask(db, question, { gateway, embed: fakeEmbed, rerank: fakeRerank })) events.push(ev);
+    const done = events.at(-1);
+    assert.ok(done?.type === 'done');
+    return { done, tokens: events.filter((e) => e.type === 'token').length };
+  };
+
+  test('ask streams an answer, keeps real citations and drops invented ones', async () => {
+    const gateway = fakeGateway('Vacuum keeps tables small [1]. See also [9].');
+    const { done, tokens } = await askAll('how do I keep postgres tables small', gateway);
+    assert.equal(tokens, 8);
+    assert.deepEqual([done.cited, done.invalid, done.cached, done.provider], [[1], [9], false, 'fake']);
+  });
+
+  test('a repeated question comes from the cache until a cited document changes', async () => {
+    const gateway = fakeGateway('Cached? [1]');
+    assert.equal((await askAll('how do I keep postgres tables small', gateway)).done.cached, true);
+    assert.equal(gateway.calls, 0);
+    await syncFeed(db, 'kb', 'notes', [
+      doc('tuning', 'database tuning checklist for MySQL', 'Tuning checklist'),
+      doc('vacuum', 'postgres vacuum settings, rewritten', 'Vacuum settings'),
+      doc('kafka', 'kafka consumer groups and partitions', 'Consumer groups'),
+    ]);
+    await embedPending(db, fakeEmbed);
+    assert.equal((await askAll('how do I keep postgres tables small', gateway)).done.cached, false);
+    assert.equal(gateway.calls, 1);
+  });
+
+  test('an answer without citations is not cached', async () => {
+    const gateway = fakeGateway('The sources do not say.');
+    await askAll('what does kafka do with offsets', gateway);
+    await askAll('what does kafka do with offsets', gateway);
+    assert.equal(gateway.calls, 2);
   });
 
   test('a long document shows up once, and closed documents not at all', async () => {

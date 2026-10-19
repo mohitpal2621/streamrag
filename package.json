@@ -8,11 +8,13 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "migrate": "node src/cli.ts migrate",
-    "ingest": "node src/cli.ts ingest",
-    "search": "node src/cli.ts search",
-    "track": "node src/cli.ts track",
-    "eval": "node src/eval.ts",
+    "migrate": "node --env-file-if-exists=.env src/cli.ts migrate",
+    "ingest": "node --env-file-if-exists=.env src/cli.ts ingest",
+    "search": "node --env-file-if-exists=.env src/cli.ts search",
+    "ask": "node --env-file-if-exists=.env src/cli.ts ask",
+    "usage": "node --env-file-if-exists=.env src/cli.ts usage",
+    "track": "node --env-file-if-exists=.env src/cli.ts track",
+    "eval": "node --env-file-if-exists=.env src/eval.ts",
     "typecheck": "tsc",
     "test": "node --test \"test/**/*.test.ts\""
   },

@@ -38,3 +38,31 @@ create table if not exists chunks (
 
 create index if not exists chunks_embedding_idx on chunks using hnsw (embedding vector_cosine_ops);
 create index if not exists chunks_tsv_idx on chunks using gin (tsv);
+
+-- Semantic cache: a new question close enough to an earlier one reuses its answer, as long as
+-- every document that answer cites is unchanged.
+create table if not exists answers (
+  id         bigserial primary key,
+  question   text not null,
+  embedding  vector(384) not null,
+  answer     text not null,
+  sources    jsonb not null,  -- the numbered sources in prompt order: documentId, title, url, hash
+  cited      int[] not null,  -- which of those numbers the answer cites
+  provider   text not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists answers_embedding_idx on answers using hnsw (embedding vector_cosine_ops);
+
+-- One row per model call or skipped provider, for latency and token usage.
+create table if not exists llm_calls (
+  id            bigserial primary key,
+  provider      text not null,
+  model         text not null,
+  status        text not null,  -- ok, error or skipped
+  error         text,
+  latency_ms    int,
+  input_tokens  int,
+  output_tokens int,
+  created_at    timestamptz not null default now()
+);
