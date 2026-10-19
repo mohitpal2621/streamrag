@@ -20,10 +20,11 @@ export async function migrate(db: pg.Pool) {
 const contentHash = (d: Doc) =>
   createHash('sha256').update(JSON.stringify([d.title, d.url, d.body, d.meta])).digest('hex');
 
-// Stores a feed's full current listing: new documents are inserted, changed ones updated,
-// and documents the feed no longer lists are closed. Unchanged documents keep their updated_at.
+// Inserts new documents and updates changed ones; unchanged documents keep their updated_at.
+// closeMissing is for snapshot feeds, which list everything that exists, so whatever they stop
+// listing is gone. Append-only feeds (RSS, Hacker News) just roll old items off; those stay open.
 // shortcut: assumes one sync per feed at a time; two concurrent syncs of the same feed need a lock.
-export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: Doc[]) {
+export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: Doc[], closeMissing = true) {
   const rows = [...new Map(docs.map((d) => [d.externalId, d])).values()]; // one upsert can't touch a row twice
   const client = await db.connect();
   try {
@@ -50,15 +51,17 @@ export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: 
         rows.map(contentHash),
       ],
     );
-    const closed = await client.query(
-      `update documents set closed_at = now()
-       where source = $1 and feed = $2 and closed_at is null and last_seen_at < now()`,
-      [source, feed],
-    );
+    const closed = closeMissing
+      ? await client.query(
+          `update documents set closed_at = now()
+           where source = $1 and feed = $2 and closed_at is null and last_seen_at < now()`,
+          [source, feed],
+        )
+      : null;
     await client.query('commit');
     const inserted = upserted.rows.filter((r) => r.inserted).length;
     const updated = upserted.rows.filter((r) => !r.inserted && r.changed).length;
-    return { inserted, updated, unchanged: rows.length - inserted - updated, closed: closed.rowCount ?? 0 };
+    return { inserted, updated, unchanged: rows.length - inserted - updated, closed: closed?.rowCount ?? 0 };
   } catch (err) {
     await client.query('rollback');
     throw err;
@@ -81,14 +84,6 @@ export async function search(db: pg.Pool, query: string, limit: number) {
      ) top
      order by rank desc`,
     [query, limit],
-  );
-  return rows;
-}
-
-export async function openDocuments(db: pg.Pool, sources: string[]) {
-  const { rows } = await db.query<{ title: string; feed: string; url: string | null; body: string; meta: { location?: string | null } }>(
-    'select title, feed, url, body, meta from documents where closed_at is null and source = any($1)',
-    [sources],
   );
   return rows;
 }

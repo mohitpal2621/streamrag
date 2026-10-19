@@ -1,6 +1,8 @@
+// shortcut: the common named entities only; swap in a full HTML entity table if rarer ones start to matter.
 const NAMED: Record<string, string> = {
   amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
   lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', ndash: '–', mdash: '—', hellip: '…', bull: '•', middot: '·',
+  rarr: '→', larr: '←', times: '×', copy: '©', pound: '£', euro: '€', eacute: 'é',
 };
 
 export const decodeEntities = (s: string) =>
@@ -11,7 +13,7 @@ export const decodeEntities = (s: string) =>
   });
 
 export const htmlToText = (html: string) =>
-  decodeEntities(html.replace(/<(?:br|\/p|\/div|\/li|\/h[1-6])\b[^>]*>/gi, '\n').replace(/<[^>]*>/g, ' '))
+  decodeEntities(html.replace(/<(?:br|p|\/p|\/div|\/li|\/h[1-6])\b[^>]*>/gi, '\n').replace(/<[^>]*>/g, ' '))
     .replace(/[ \t ]+/g, ' ')
     .replace(/\s*\n\s*/g, '\n')
     .trim();

@@ -1,8 +1,8 @@
--- Every source (job boards today, media and docs later) lands in this one table.
+-- Every source (feeds and APIs today, media later) lands in this one table.
 create table if not exists documents (
   id            bigserial primary key,
-  source        text not null,          -- connector name, e.g. greenhouse
-  feed          text not null,          -- one stream within a source, e.g. a company's board
+  source        text not null,          -- connector name, e.g. rss
+  feed          text not null,          -- one stream within a source, e.g. a blog's feed URL
   external_id   text not null,
   title         text not null,
   url           text,

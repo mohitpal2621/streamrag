@@ -1,51 +1,130 @@
 [
-  { "connector": "lever", "feed": "paytm" },
-  { "connector": "lever", "feed": "meesho" },
-  { "connector": "lever", "feed": "cred" },
-  { "connector": "lever", "feed": "zeta" },
-  { "connector": "lever", "feed": "mindtickle" },
-  { "connector": "ashby", "feed": "sarvam" },
-  { "connector": "greenhouse", "feed": "groww" },
-  { "connector": "greenhouse", "feed": "inmobi" },
-  { "connector": "greenhouse", "feed": "druva" },
-  { "connector": "greenhouse", "feed": "observeai" },
-  { "connector": "greenhouse", "feed": "stripe" },
-  { "connector": "greenhouse", "feed": "gitlab" },
-  { "connector": "greenhouse", "feed": "airbnb" },
-  { "connector": "greenhouse", "feed": "dropbox" },
-  { "connector": "greenhouse", "feed": "figma" },
-  { "connector": "greenhouse", "feed": "discord" },
-  { "connector": "greenhouse", "feed": "cloudflare" },
-  { "connector": "greenhouse", "feed": "databricks" },
-  { "connector": "greenhouse", "feed": "mongodb" },
-  { "connector": "greenhouse", "feed": "coinbase" },
-  { "connector": "greenhouse", "feed": "reddit" },
-  { "connector": "greenhouse", "feed": "pinterest" },
-  { "connector": "greenhouse", "feed": "twilio" },
-  { "connector": "greenhouse", "feed": "okta" },
-  { "connector": "greenhouse", "feed": "datadog" },
-  { "connector": "greenhouse", "feed": "elastic" },
-  { "connector": "greenhouse", "feed": "gusto" },
-  { "connector": "greenhouse", "feed": "asana" },
-  { "connector": "greenhouse", "feed": "brex" },
-  { "connector": "greenhouse", "feed": "samsara" },
-  { "connector": "greenhouse", "feed": "anthropic" },
-  { "connector": "greenhouse", "feed": "vercel" },
-  { "connector": "greenhouse", "feed": "airtable" },
-  { "connector": "greenhouse", "feed": "scaleai" },
-  { "connector": "greenhouse", "feed": "grafanalabs" },
-  { "connector": "ashby", "feed": "supabase" },
-  { "connector": "ashby", "feed": "notion" },
-  { "connector": "ashby", "feed": "linear" },
-  { "connector": "ashby", "feed": "ramp" },
-  { "connector": "ashby", "feed": "openai" },
-  { "connector": "ashby", "feed": "posthog" },
-  { "connector": "ashby", "feed": "plaid" },
-  { "connector": "ashby", "feed": "cohere" },
-  { "connector": "ashby", "feed": "perplexity" },
-  { "connector": "ashby", "feed": "sentry" },
-  { "connector": "ashby", "feed": "temporal" },
-  { "connector": "ashby", "feed": "clickhouse" },
-  { "connector": "lever", "feed": "palantir" },
-  { "connector": "lever", "feed": "spotify" }
+  {
+    "connector": "rss",
+    "feed": "https://blog.cloudflare.com/rss/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://netflixtechblog.com/feed"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://stripe.com/blog/feed.rss"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://engineering.fb.com/feed/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://github.blog/engineering/feed/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://slack.engineering/feed/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://dropbox.tech/feed"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://discord.com/blog/rss.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://engineering.razorpay.com/feed"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://tech.groww.in/feed"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://blog.bytebytego.com/feed"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://blog.pragmaticengineer.com/rss/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://highscalability.com/rss/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://www.infoq.com/feed"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://martinfowler.com/feed.atom"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://jvns.ca/atom.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://danluu.com/atom.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://simonwillison.net/atom/everything/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://nodejs.org/en/feed/releases.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://nextjs.org/feed.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://react.dev/rss.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://devblogs.microsoft.com/typescript/feed/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://bun.sh/rss.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://deno.com/feed"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://vercel.com/atom"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://kubernetes.io/feed.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://www.postgresql.org/news.rss"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://redis.io/blog/feed/"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://blog.rust-lang.org/feed.xml"
+  },
+  {
+    "connector": "rss",
+    "feed": "https://go.dev/blog/feed.atom"
+  },
+  {
+    "connector": "hackernews",
+    "feed": "story"
+  },
+  {
+    "connector": "hackernews",
+    "feed": "comment"
+  }
 ]

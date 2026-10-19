@@ -11,11 +11,12 @@
     "migrate": "node src/cli.ts migrate",
     "ingest": "node src/cli.ts ingest",
     "search": "node src/cli.ts search",
-    "match": "node src/cli.ts match",
+    "track": "node src/cli.ts track",
     "typecheck": "tsc",
     "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
+    "fast-xml-parser": "^5.11.2",
     "pg": "^8.23.1"
   },
   "devDependencies": {
