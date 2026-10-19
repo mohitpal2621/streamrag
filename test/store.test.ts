@@ -96,6 +96,8 @@ describe('embedding and search', () => {
 
   test('keyword search needs the words; vector search finds the meaning', async () => {
     assert.deepEqual(await find('database tuning', 'keyword'), ['Tuning checklist']);
+    // Any of the words counts, and chunks with more of them rank higher.
+    assert.deepEqual(await find('database tuning for kafka', 'keyword'), ['Tuning checklist', 'Consumer groups']);
     const byMeaning = await find('database tuning', 'vector');
     assert.deepEqual(byMeaning.slice(0, 2).sort(), ['Tuning checklist', 'Vacuum settings']);
     assert.equal(byMeaning[2], 'Consumer groups');

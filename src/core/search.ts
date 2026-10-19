@@ -12,11 +12,17 @@ const RERANK_POOL = 30; // the cross-encoder is slow, so it only sees the best f
 // Keyword and vector search each rank their best chunks, then reciprocal rank fusion adds
 // 1 / (60 + rank) from each list. A chunk both legs like wins, and raw scores from the two legs,
 // which aren't comparable, never get mixed. A disabled leg returns nothing, so one query serves all modes.
+// A question rarely has all of its words in one chunk, so the keyword leg matches any of them (OR)
+// and leaves it to ts_rank_cd to favour chunks that have more of them, close together.
 const FUSED = `
-  with keyword as (
-    select c.id, row_number() over (order by ts_rank_cd(c.tsv, q) desc) as rank
-    from chunks c join documents d on d.id = c.document_id, websearch_to_tsquery('english', $1) q
-    where $3 and d.closed_at is null and c.tsv @@ q
+  with terms as (
+    select to_tsquery('simple', string_agg(quote_literal(lexeme), ' | ')) as q
+    from unnest(to_tsvector('english', $1))
+  ),
+  keyword as (
+    select c.id, row_number() over (order by ts_rank_cd(c.tsv, terms.q) desc) as rank
+    from chunks c join documents d on d.id = c.document_id, terms
+    where $3 and d.closed_at is null and c.tsv @@ terms.q
     order by rank limit ${CANDIDATES}
   ),
   vector as (
