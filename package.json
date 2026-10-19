@@ -12,9 +12,11 @@
     "ingest": "node --env-file-if-exists=.env src/cli.ts ingest",
     "search": "node --env-file-if-exists=.env src/cli.ts search",
     "ask": "node --env-file-if-exists=.env src/cli.ts ask",
+    "upgrade": "node --env-file-if-exists=.env src/cli.ts upgrade",
     "usage": "node --env-file-if-exists=.env src/cli.ts usage",
     "track": "node --env-file-if-exists=.env src/cli.ts track",
     "eval": "node --env-file-if-exists=.env src/eval.ts",
+    "eval:llm": "node eval/llm/setup.ts && node --env-file-if-exists=.env eval/llm/run.ts",
     "typecheck": "tsc",
     "test": "node --test \"test/**/*.test.ts\""
   },

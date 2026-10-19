@@ -10,15 +10,18 @@ import { connect, migrate } from './core/store.ts';
 import { createGateway } from './llm/gateway.ts';
 import { providersFromEnv } from './llm/providers.ts';
 import { mergeSources, sourcesForPackageJson } from './track.ts';
+import { breakingChanges } from './upgrade.ts';
 
 const USAGE = `usage:
-  npm run migrate                    create the tables
-  npm run ingest                     sync every feed in sources.json, then embed what changed
-  npm run search -- "<query>"        search everything synced
-  npm run ask -- "<question>"        answer from the synced sources, with citations
-  npm run usage                      model calls, errors, latency and tokens over the last 7 days
-  npm run track -- <package.json>    follow the release notes and security advisories of its dependencies
-  npm run eval                       score each search mode on the eval set
+  npm run migrate                       create the tables
+  npm run ingest                        sync every feed in sources.json, then embed what changed
+  npm run search -- "<query>"           search everything synced
+  npm run ask -- "<question>"           answer from the synced sources, with citations
+  npm run upgrade -- <package> <from> [to]
+                                        what breaks between two versions of an npm package (to defaults to latest)
+  npm run usage                         model calls, errors, latency and tokens over the last 7 days
+  npm run track -- <package.json>       follow the release notes and security advisories of its dependencies
+  npm run eval                          score each search mode on the eval set
 options:
   -n, --limit <count>                how many search results to show (default 10)
   -m, --mode <mode>                  keyword, vector, hybrid or rerank (default rerank)`;
@@ -32,11 +35,28 @@ const { positionals, values } = parseArgs({
     mode: { type: 'string', short: 'm', default: 'rerank' },
   },
 });
-const [command, arg] = positionals;
+const [command, arg, ...rest] = positionals;
 const limit = Number(values.limit);
 const mode = MODES.find((m) => m === values.mode);
 
 const db = connect();
+// Every model call is logged to llm_calls; the inserts are awaited before the pool closes.
+const logged: Promise<unknown>[] = [];
+const loggedGateway = () =>
+  createGateway({
+    providers: providersFromEnv(),
+    onCall: (c) =>
+      logged.push(
+        db
+          .query(
+            `insert into llm_calls (provider, model, status, error, latency_ms, input_tokens, output_tokens)
+             values ($1, $2, $3, $4, $5, $6, $7)`,
+            [c.provider, c.model, c.status, c.error ?? null, c.latencyMs ?? null, c.inputTokens ?? null, c.outputTokens ?? null],
+          )
+          .catch((err) => console.error(`could not log a model call: ${err}`)),
+      ),
+  });
+
 try {
   if (!Number.isInteger(limit) || limit < 1) throw new Error('--limit must be a positive whole number');
   if (!mode) throw new Error(`--mode must be one of: ${MODES.join(', ')}`);
@@ -75,32 +95,40 @@ try {
 
     case 'ask': {
       if (!arg) throw new Error('give a question');
-      const logged: Promise<unknown>[] = [];
-      const gateway = createGateway({
-        providers: providersFromEnv(),
-        onCall: (c) =>
-          logged.push(
-            db.query(
-              `insert into llm_calls (provider, model, status, error, latency_ms, input_tokens, output_tokens)
-               values ($1, $2, $3, $4, $5, $6, $7)`,
-              [c.provider, c.model, c.status, c.error ?? null, c.latencyMs ?? null, c.inputTokens ?? null, c.outputTokens ?? null],
-            ),
-          ),
-      });
-      try {
-        let sources: { title: string; url: string | null }[] = [];
-        for await (const ev of ask(db, arg, { gateway, embed, rerank })) {
-          if (ev.type === 'sources') sources = ev.sources;
-          if (ev.type === 'token') process.stdout.write(ev.text);
-          if (ev.type === 'done') {
-            console.log('\n');
-            for (const n of ev.cited) console.log(`[${n}] ${sources[n - 1].title}  ${sources[n - 1].url ?? ''}`);
-            if (ev.invalid.length) console.log(`(ignored citations to sources that don't exist: ${ev.invalid.join(', ')})`);
-            if (ev.provider) console.log(ev.cached ? `\ncached answer, first written by ${ev.provider}` : `\nanswered by ${ev.provider}`);
-          }
+      let sources: { title: string; url: string | null }[] = [];
+      for await (const ev of ask(db, arg, { gateway: loggedGateway(), embed, rerank })) {
+        if (ev.type === 'sources') sources = ev.sources;
+        if (ev.type === 'token') process.stdout.write(ev.text);
+        if (ev.type === 'done') {
+          console.log('\n');
+          for (const n of ev.cited) console.log(`[${n}] ${sources[n - 1].title}  ${sources[n - 1].url ?? ''}`);
+          if (ev.invalid.length) console.log(`(ignored citations to sources that don't exist: ${ev.invalid.join(', ')})`);
+          if (ev.provider) console.log(ev.cached ? `\ncached answer, first written by ${ev.provider}` : `\nanswered by ${ev.provider}`);
         }
-      } finally {
-        await Promise.all(logged);
+      }
+      break;
+    }
+
+    case 'upgrade': {
+      const [from, to] = rest;
+      if (!arg || !from) throw new Error('give a package and the version you are on, e.g. npm run upgrade -- next 14.2.0 15.1.0');
+      let read = false;
+      const result = await breakingChanges(db, loggedGateway(), arg, from, to, (title) => {
+        read = true;
+        console.log(`reading the notes for ${title}…`);
+      });
+      const checked = result.releases.map((r) => r.version).join(', ');
+      console.log(`${read ? '\n' : ''}${arg} ${from} → ${result.to} (github.com/${result.repo})`);
+      console.log(checked ? `releases read: ${checked}; patch releases are skipped\n` : 'no major or minor release in that range; patch releases are skipped');
+      for (const r of result.releases) {
+        if (!r.changes) {
+          console.log(`${r.version}  ${r.error ? `could not fetch the notes: ${r.error}` : 'no release notes on GitHub'}\n`);
+          continue;
+        }
+        console.log(`${r.version}  ${r.url}`);
+        if (!r.changes.length) console.log(r.short ? '  the notes are only a line or two; they may just link to a changelog' : '  nothing breaking listed');
+        for (const b of r.changes) console.log(`  - ${b.change}${b.migration ? `\n    → ${b.migration}` : ''}`);
+        console.log('');
       }
       break;
     }
@@ -140,5 +168,6 @@ try {
   console.error(String(err));
   process.exitCode = 1;
 } finally {
+  await Promise.all(logged);
   await db.end();
 }

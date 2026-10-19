@@ -23,13 +23,16 @@ function retryAfter(header: string | null): number | null {
   return Number.isNaN(date) ? null : Math.max(0, date - Date.now());
 }
 
+// Extra request fields, such as response_format for JSON output or a different temperature.
+export type ChatOptions = Record<string, unknown>;
+
 // Streams a chat completion from an OpenAI-compatible endpoint. Ollama, Gemini and Groq all offer
 // one, so a single client covers every provider.
-export async function* streamChat(p: Provider, messages: Message[]): AsyncGenerator<ChatEvent> {
+export async function* streamChat(p: Provider, messages: Message[], options: ChatOptions = {}): AsyncGenerator<ChatEvent> {
   const res = await fetch(`${p.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}) },
-    body: JSON.stringify({ model: p.model, messages, stream: true, stream_options: { include_usage: true }, temperature: 0.2 }),
+    body: JSON.stringify({ model: p.model, messages, stream: true, stream_options: { include_usage: true }, temperature: 0.2, ...options }),
     signal: AbortSignal.timeout(180_000),
   });
   if (!res.ok || !res.body) {

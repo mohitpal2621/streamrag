@@ -12,6 +12,7 @@ create table if not exists documents (
   meta          jsonb not null default '{}',
   content_hash  text not null,
   embedded_hash text,                                -- content_hash the current chunks were made from
+  extracted_hash text,                               -- content_hash its breaking changes were read from
   first_seen_at timestamptz not null default now(),
   updated_at    timestamptz not null default now(),  -- last time the content changed
   last_seen_at  timestamptz not null default now(),
@@ -22,6 +23,7 @@ create table if not exists documents (
 -- Upgrades a phase 1 database: search moved from whole documents to chunks.
 alter table documents add column if not exists embedded_hash text;
 alter table documents drop column if exists tsv;
+alter table documents add column if not exists extracted_hash text;
 
 create index if not exists documents_open_idx on documents (source, feed) where closed_at is null;
 
@@ -53,6 +55,15 @@ create table if not exists answers (
 );
 
 create index if not exists answers_embedding_idx on answers using hnsw (embedding vector_cosine_ops);
+
+-- Breaking changes a model read out of release notes, replaced whenever the notes change.
+create table if not exists breaking_changes (
+  document_id bigint not null references documents (id) on delete cascade,
+  ord         int not null,
+  change      text not null,
+  migration   text not null,  -- what to do instead; empty when the notes don't say
+  primary key (document_id, ord)
+);
 
 -- One row per model call or skipped provider, for latency and token usage.
 create table if not exists llm_calls (
