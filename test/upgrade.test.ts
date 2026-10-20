@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { extractBreaking, pieces } from '../src/core/extract.ts';
+import { extractBreaking, markedBreaking, pieces } from '../src/core/extract.ts';
 import type { ChatOptions, Message } from '../src/llm/openai.ts';
 import { parseVersion, releasesToCheck } from '../src/upgrade.ts';
 
@@ -58,4 +58,22 @@ test('a reply that is not the JSON asked for gets one retry', async () => {
   assert.deepEqual(await extractBreaking(g, 'v1.1.0', 'Fixes a typo.'), []);
   assert.equal(g.asked.length, 2);
   await assert.rejects(extractBreaking(scripted(['nope', '{"changes": []}']), 'v1.2.0', 'notes'), /did not reply with the JSON asked for/);
+});
+
+test('conventional-commit breaking markers are read without the model', async () => {
+  const notes = [
+    '* [`53f0f47`](https://github.com/o/r/commit/53f0f47) feat!: Remove CodePath#currentSegments (#17756) (Milos Djermanovic)',
+    '* [`19f9a89`](https://github.com/o/r/commit/19f9a89) chore: Update dependencies (#18275) (Nicholas C. Zakas)',
+    '- fix(cli)!: exit with 2 on a config error',
+    'BREAKING CHANGE: the cache file moved to .cache/',
+    'feat: add a --json flag',
+  ].join('\n');
+  const { marked, rest } = markedBreaking(notes);
+  assert.deepEqual(marked.map((b) => b.change), ['Remove CodePath#currentSegments', 'exit with 2 on a config error', 'the cache file moved to .cache/']);
+  assert.equal(rest, '* `19f9a89` chore: Update dependencies (#18275) (Nicholas C. Zakas)\nfeat: add a --json flag');
+
+  const g = scripted(['{"breaking": [{"change": "Drops the --legacy flag", "migration": ""}]}']);
+  const found = await extractBreaking(g, 'v9.0.0', notes);
+  assert.equal(found.length, 4);
+  assert.ok(!g.asked[0].messages[1].content.includes('feat!:')); // the model only saw the unmarked lines
 });
