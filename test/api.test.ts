@@ -202,6 +202,7 @@ test('live turns each commit into activity: changes, when they become searchable
     const added = await first;
     assert.ok(added.type === 'document');
     assert.equal(added.change, 'added');
+    assert.equal(added.searchableAfterMs, null);
     assert.deepEqual(added.document, {
       id: added.document.id,
       source: 'hackernews',
@@ -299,7 +300,7 @@ test('GraphQL streams activity and answers the dashboard queries', async () => {
   const { data, errors } = await (
     await post(`{
       status { documents chunks outbox pendingEmbeddings lag { group } kafkaError syncs { scheduled } redisError }
-      recent(limit: 2) { change document { title searchable } }
+      recent(limit: 2) { change searchableAfterMs document { title searchable } }
       pulse(minutes: 5) { source documents }
       feeds { source feed documents nextSyncAt }
       usage { provider ok errors avgMs p95Ms inputTokens outputTokens }
@@ -314,7 +315,9 @@ test('GraphQL streams activity and answers the dashboard queries', async () => {
   assert.match(data.status.kafkaError, /127\.0\.0\.1:1/);
   assert.equal(data.status.syncs, null);
   assert.ok(data.status.redisError);
-  assert.deepEqual(data.recent[0], { change: 'added', document: { title: 'Re: autovacuum tuning', searchable: true } });
+  const { searchableAfterMs, ...latest } = data.recent[0];
+  assert.deepEqual(latest, { change: 'added', document: { title: 'Re: autovacuum tuning', searchable: true } });
+  assert.ok(searchableAfterMs >= 0 && searchableAfterMs < 60_000, `searchableAfterMs ${searchableAfterMs}`);
   assert.ok(data.pulse.some((b: { source: string; documents: number }) => b.source === 'hackernews' && b.documents > 0));
   assert.deepEqual(
     data.feeds.find((f: { feed: string }) => f.feed === 'drafts'),

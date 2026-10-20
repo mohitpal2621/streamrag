@@ -7,6 +7,7 @@ export type DocumentActivity = {
   id: string; // the outbox row
   at: string;
   change: 'added' | 'changed' | 'closed';
+  searchableAfterMs: number | null;
   document: { id: string; source: string; feed: string; title: string; url: string | null; snippet: string; searchable: boolean };
 };
 export type Alert = { id: string; at: string; package: string; title: string; url: string | null };
@@ -14,6 +15,9 @@ export type Activity = DocumentActivity | { type: 'searchable'; at: string; docu
 
 // Outbox rows as feed entries, newest first, with each document's current title and whether its
 // current version is embedded yet. The relay prunes published rows after a day, so this is recent history.
+// A sync writes the outbox row in the transaction that sets updated_at, so the row whose created_at
+// equals updated_at is the change the current chunks were made for, and its time to searchable is
+// embedded_at minus that.
 export async function documentActivity(db: pg.Pool, { ids, limit }: { ids?: string[]; limit?: number }) {
   const { rows } = await db.query<{
     id: string;
@@ -27,12 +31,15 @@ export async function documentActivity(db: pg.Pool, { ids, limit }: { ids?: stri
     url: string | null;
     snippet: string;
     searchable: boolean;
+    searchable_after_ms: number | null;
   }>(
     // The snippet skips a leading markdown heading, which OSV advisories open with.
     `select o.id, o.created_at, o.payload->>'type' as type, (o.payload->>'inserted')::boolean as inserted,
             d.id as document_id, d.source, d.feed, d.title, d.url,
             trim(left(regexp_replace(regexp_replace(d.body, '^\\s*#[^\\n]*\\n', ''), '\\s+', ' ', 'g'), 200)) as snippet,
-            d.embedded_hash is not distinct from d.content_hash as searchable
+            d.embedded_hash is not distinct from d.content_hash as searchable,
+            case when d.embedded_hash is not distinct from d.content_hash and o.created_at = d.updated_at and d.embedded_at >= o.created_at
+              then (extract(epoch from d.embedded_at - o.created_at) * 1000)::float8 end as searchable_after_ms
      from outbox o join documents d on d.id = (o.payload->>'documentId')::bigint
      where $1::bigint[] is null or o.id = any($1::bigint[])
      order by o.id desc limit $2`,
@@ -44,6 +51,7 @@ export async function documentActivity(db: pg.Pool, { ids, limit }: { ids?: stri
       id: r.id,
       at: r.created_at.toISOString(),
       change: r.type === 'document.closed' ? 'closed' : r.inserted ? 'added' : 'changed',
+      searchableAfterMs: r.type === 'document.closed' ? null : r.searchable_after_ms,
       document: { id: r.document_id, source: r.source, feed: r.feed, title: r.title, url: r.url, snippet: r.snippet, searchable: r.searchable },
     }),
   );

@@ -12,8 +12,10 @@ test.describe('live page', () => {
     await expect(page.getByRole('heading', { name: 'Synced in the last 15 minutes' })).toBeVisible();
     await expect(page.getByRole('status')).toHaveText('Live');
     await expect(page.locator('.finding')).toContainText("can't reach Kafka");
-    await expect(page.locator('.stages')).toContainText('searchable chunks');
-    await expect(page.locator('.feed li').filter({ hasText: 'Vacuum settings' }).locator('.state')).toHaveText('Yes');
+    await expect(page.locator('.stages')).toContainText(/\d+ documents, \d+ chunks/);
+    // Embedded before the page opened, so the API supplies its time to searchable.
+    await expect(page.locator('.feed li').filter({ hasText: 'Vacuum settings' }).locator('.state')).toHaveText(/^After \d/);
+    await expect(page.locator('.changes .card-head')).toContainText('Searchable a median of');
     await expect(page.locator('.pulse .by-source')).toContainText('Blogs, podcasts and releases');
     await expect(page.getByText("Kafka isn't reachable")).toBeVisible();
     await expect(page.locator('table').filter({ hasText: 'Feed' }).first()).toContainText('lodash advisories');

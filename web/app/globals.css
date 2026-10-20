@@ -589,7 +589,7 @@ main {
 
 .stages dt,
 .stages dd {
-  padding: 6px 0;
+  padding: 5px 0;
   border-bottom: 1px solid var(--rule);
 }
 
@@ -826,12 +826,7 @@ button.text:hover:not(:disabled) {
 
 button:disabled {
   cursor: default;
-  background: var(--raised);
-  color: var(--muted);
-}
-
-button.text:disabled {
-  background: none;
+  opacity: 0.45;
 }
 
 input {
@@ -882,6 +877,14 @@ input:focus-visible {
   align-items: start;
 }
 
+.ask-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.phone-only {
+  display: none;
+}
+
 .ask-form {
   display: flex;
   flex-wrap: wrap;
@@ -917,6 +920,10 @@ input:focus-visible {
   color: var(--muted);
 }
 
+.examples {
+  margin-top: 28px;
+}
+
 .examples h2,
 .index h2 {
   margin-bottom: 8px;
@@ -926,6 +933,7 @@ input:focus-visible {
   list-style: none;
   margin: 0;
   padding: 0;
+  max-width: 72ch;
 }
 
 .examples li {
@@ -1060,6 +1068,10 @@ input:focus-visible {
 }
 
 .hits p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
   margin-top: 2px;
   color: var(--muted);
 }
@@ -1135,11 +1147,16 @@ input:focus-visible {
 
   table.models th:nth-child(2),
   table.models th:nth-child(3) {
-    width: 64px;
+    width: 76px;
   }
 
-  table.models th:nth-child(4) {
-    width: 72px;
+  table.models th:nth-child(4),
+  table.models td:nth-child(4) {
+    display: none;
+  }
+
+  .phone-only {
+    display: inline;
   }
 
   .modes {

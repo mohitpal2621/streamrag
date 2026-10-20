@@ -1,5 +1,5 @@
 export type Document = { id: string; source: string; feed: string; title: string; url: string | null; snippet: string; searchable: boolean };
-export type DocumentActivity = { id: string; at: string; change: 'added' | 'changed' | 'closed'; document: Document };
+export type DocumentActivity = { id: string; at: string; change: 'added' | 'changed' | 'closed'; searchableAfterMs: number | null; document: Document };
 export type Alert = { id: string; at: string; package: string; title: string; url: string | null };
 export type Activity =
   | ({ __typename: 'DocumentActivity' } & DocumentActivity)
@@ -36,7 +36,7 @@ export type Snapshot = { status: Status; recent: DocumentActivity[]; pulse: Puls
 export const FEED_ROWS = 40;
 
 const DOCUMENT = 'id source feed title url snippet searchable';
-export const ACTIVITY_FIELDS = `id at change document { ${DOCUMENT} }`;
+export const ACTIVITY_FIELDS = `id at change searchableAfterMs document { ${DOCUMENT} }`;
 export const ALERT_FIELDS = 'id at package title url';
 export const STATUS_QUERY = `status {
   documents chunks outbox oldestOutboxSeconds pendingEmbeddings alertsThisWeek

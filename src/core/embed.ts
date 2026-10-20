@@ -30,9 +30,10 @@ export async function embedDocs(db: pg.Pool, embed: Embed, docs: Pending[]) {
        select * from unnest($1::bigint[], $2::int[], $3::text[], $4::vector[])`,
       [pieces.map((p) => p.documentId), pieces.map((p) => p.ord), pieces.map((p) => p.text), vectors.map((v) => `[${v.join(',')}]`)],
     );
-    // Stores the hash that was read, so a document edited in the meantime is redone next time.
+    // Stores the hash that was read, so a document edited in the meantime is redone next time, and
+    // when, so the dashboard can show how long the document took to become searchable.
     await client.query(
-      `update documents set embedded_hash = v.hash
+      `update documents set embedded_hash = v.hash, embedded_at = clock_timestamp()
        from unnest($1::bigint[], $2::text[]) v(id, hash) where documents.id = v.id`,
       [docs.map((d) => d.id), docs.map((d) => d.content_hash)],
     );

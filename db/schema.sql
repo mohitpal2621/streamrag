@@ -12,6 +12,7 @@ create table if not exists documents (
   meta          jsonb not null default '{}',
   content_hash  text not null,
   embedded_hash text,                                -- content_hash the current chunks were made from
+  embedded_at   timestamptz,                         -- when those chunks were stored
   extracted_hash text,                               -- content_hash its breaking changes were read from
   first_seen_at timestamptz not null default now(),
   updated_at    timestamptz not null default now(),  -- last time the content changed
@@ -22,6 +23,7 @@ create table if not exists documents (
 
 -- Upgrades a phase 1 database: search moved from whole documents to chunks.
 alter table documents add column if not exists embedded_hash text;
+alter table documents add column if not exists embedded_at timestamptz;
 alter table documents drop column if exists tsv;
 alter table documents add column if not exists extracted_hash text;
 

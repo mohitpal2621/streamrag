@@ -125,6 +125,8 @@ const typeDefs = /* GraphQL */ `
     id: ID!
     at: String!
     change: Change!
+    "Milliseconds from this change's commit to the commit of its chunks, once this version is searchable."
+    searchableAfterMs: Float
     document: Document!
   }
   type Searchable {
@@ -196,7 +198,13 @@ const typeDefs = /* GraphQL */ `
   }
 `;
 
-const snippet = (text: string) => text.slice(text.indexOf('\n') + 1, 300).replace(/\s+/g, ' ');
+// A chunk's text after its title line, cut at a word boundary near 280 characters.
+const snippet = (text: string) => {
+  const body = text.slice(text.indexOf('\n') + 1).replace(/\s+/g, ' ').trim();
+  if (body.length <= 280) return body;
+  const end = body.lastIndexOf(' ', 280);
+  return `${body.slice(0, end > 200 ? end : 280).replace(/[\s,;:.-]+$/, '')}…`;
+};
 const clamp = (n: number, max: number) => Math.min(Math.max(Math.trunc(n), 1), max);
 
 // GraphQL over HTTP, with GraphiQL at /graphql. Subscriptions stream over server-sent events, which

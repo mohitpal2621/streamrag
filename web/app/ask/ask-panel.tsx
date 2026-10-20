@@ -116,7 +116,7 @@ export function AskPanel({ api, feeds }: { api: string; feeds: Feed[] | null }) 
 
   return (
     <main>
-      <div className="ask-grid">
+      <div className={`ask-grid${feeds?.length ? '' : ' single'}`}>
         <div>
           <h1>Ask the sources</h1>
           <p className="finding">
@@ -147,17 +147,31 @@ export function AskPanel({ api, feeds }: { api: string; feeds: Feed[] | null }) 
           </form>
 
           {turns.length === 0 ? (
-            <dl className="modes">
-              <dt>Ask</dt>
-              <dd>Writes one answer from the six best-matching documents and cites them.</dd>
-              <dt>Ask the agent</dt>
-              <dd>
-                Can also read the breaking changes between two versions of an npm package and look up its security advisories. It remembers the
-                conversation, so follow-up questions work.
-              </dd>
-              <dt>Search</dt>
-              <dd>Lists the best-matching documents without writing an answer.</dd>
-            </dl>
+            <>
+              <dl className="modes">
+                <dt>Ask</dt>
+                <dd>Writes one answer from the six best-matching documents and cites them.</dd>
+                <dt>Ask the agent</dt>
+                <dd>
+                  Can also read the breaking changes between two versions of an npm package and look up its security advisories. It remembers the
+                  conversation, so follow-up questions work.
+                </dd>
+                <dt>Search</dt>
+                <dd>Lists the best-matching documents without writing an answer.</dd>
+              </dl>
+              <section className="examples" aria-labelledby="examples-title">
+                <h2 id="examples-title">Try asking</h2>
+                <ul>
+                  {EXAMPLES.map((q) => (
+                    <li key={q}>
+                      <button type="button" className="text" onClick={() => setQuestion(q)}>
+                        {q}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            </>
           ) : (
             <>
               {turns.map((t) => (
@@ -182,21 +196,11 @@ export function AskPanel({ api, feeds }: { api: string; feeds: Feed[] | null }) 
           )}
         </div>
 
-        <aside className="card rail">
-          <section className="examples" aria-labelledby="examples-title">
-            <h2 id="examples-title">Try asking</h2>
-            <ul>
-              {EXAMPLES.map((q) => (
-                <li key={q}>
-                  <button type="button" className="text" onClick={() => setQuestion(q)}>
-                    {q}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-          {feeds && feeds.length > 0 && <IndexPanel feeds={feeds} />}
-        </aside>
+        {feeds && feeds.length > 0 && (
+          <aside className="card rail">
+            <IndexPanel feeds={feeds} />
+          </aside>
+        )}
       </div>
     </main>
   );
@@ -342,7 +346,7 @@ function Hits({ hits }: { hits: Hit[] }) {
               h.title
             )}
             <span className="kind">{KINDS[kind]}</span>
-            <p>{h.snippet}</p>
+            {h.snippet && h.snippet !== h.title && <p>{h.snippet}</p>}
           </li>
         );
       })}

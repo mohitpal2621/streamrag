@@ -21,8 +21,8 @@ import {
 } from '../lib/types';
 import { bucketOf, Pulse, syncedSince, toBuckets, withDocument, type Waiting } from './pulse';
 
-// A row of the feed. `searchableAfter` is measured here: the time from the sync's commit to the
-// moment the embedder said the document was searchable, for documents seen making that change.
+// A row of the feed. `searchableAfter` is the time from the sync's commit to its chunks' commit: the
+// API's figure for rows embedded before the page opened, and measured from the stream for the rest.
 type Row = DocumentActivity & { fresh?: boolean; searchableAfter?: number };
 
 const CONNECTION = { connecting: 'Connecting', live: 'Live', reconnecting: 'Reconnecting' };
@@ -38,12 +38,15 @@ function useNow(start: number) {
   return now;
 }
 
+const measured = (rows: DocumentActivity[]): Row[] =>
+  rows.map((r) => (r.searchableAfterMs === null ? r : { ...r, searchableAfter: r.searchableAfterMs }));
+
 // Rows the embedder hasn't reached yet, so the pulse can show them waiting.
 const waitingIn = (rows: Row[]): Waiting =>
   Object.fromEntries(rows.filter((r) => !r.document.searchable && r.change !== 'closed').map((r) => [r.document.id, bucketOf(r.at)]));
 
 export function LiveDashboard({ api, initial, renderedAt }: { api: string; initial: Snapshot; renderedAt: number }) {
-  const [rows, setRows] = useState<Row[]>(initial.recent);
+  const [rows, setRows] = useState(() => measured(initial.recent));
   const [buckets, setBuckets] = useState(() => toBuckets(initial.pulse));
   const [waiting, setWaiting] = useState(() => waitingIn(initial.recent));
   const [alerts, setAlerts] = useState(initial.alerts);
@@ -62,7 +65,7 @@ export function LiveDashboard({ api, initial, renderedAt }: { api: string; initi
     const reload = () =>
       query<Pick<Snapshot, 'recent' | 'pulse'>>(api, `{ recent(limit: ${FEED_ROWS}) { ${ACTIVITY_FIELDS} } pulse(minutes: 15) { at source documents } }`).then(
         (d) => {
-          setRows(d.recent);
+          setRows(measured(d.recent));
           setBuckets(toBuckets(d.pulse));
           setWaiting(waitingIn(d.recent));
         },
@@ -376,10 +379,7 @@ function PipelinePanel({ status: s }: { status: Status }) {
     label: 'Index',
     value: (
       <>
-        <span className="fig">{count(s.documents)}</span> documents
-        <span className="detail">
-          <span className="fig">{count(s.chunks)}</span> searchable chunks
-        </span>
+        <span className="fig">{count(s.documents)}</span> documents, <span className="fig">{count(s.chunks)}</span> chunks
       </>
     ),
   });
@@ -532,7 +532,12 @@ function ModelsPanel({ usage }: { usage: ModelUsage[] }) {
                   <span className="clip" title={u.model}>
                     {u.model}
                   </span>
-                  <span className="sub">{u.provider}</span>
+                  <span className="sub">
+                    {u.provider}
+                    <span className="phone-only">
+                      , {compact(u.inputTokens)} in, {compact(u.outputTokens)} out
+                    </span>
+                  </span>
                 </td>
                 <td className="num">
                   {count(u.ok)}
