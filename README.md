@@ -268,19 +268,19 @@ Results on 557 advisories, October 2026:
 |---|---|---|---|---|
 | keyword | 0.11 | 0.14 | 0.14 | 0.13 |
 | vector | 0.88 | 0.95 | 0.95 | 0.90 |
-| hybrid | 0.89 | 1.00 | 1.00 | 0.92 |
-| rerank | 0.89 | 1.00 | 1.00 | 0.93 |
+| hybrid | 0.88 | 1.00 | 1.00 | 0.92 |
+| rerank | 0.88 | 1.00 | 1.00 | 0.93 |
 
 Recall@k is the share of questions whose answer shows up in the top k results. MRR rewards putting it first. The corpus grows as new advisories are published, so the numbers move a little over time.
 
-The models now embed one text per call instead of padded batches of 16 (see How it's built). That changed the vectors slightly, and on the same 557 advisories it moved vector search's recall@5 from 0.91 to 0.95 and hybrid's from 0.96 to 1.00. The whole eval ran in 6.5 minutes instead of 10.
+The models now embed one text per call instead of padded batches of 16 (see How it's built). That changed the vectors slightly, and on the same 557 advisories it moved vector search's recall@5 from 0.91 to 0.95 and hybrid's from 0.96 to 1.00. With that and transformers.js 4, the whole eval runs in under four minutes, down from ten.
 
 Keyword search on its own needs every word of a question in one chunk, so it rarely finds an answer to a natural question. Inside hybrid search the strictness helps: it fires on exact names and IDs, which the vectors miss, and lifts recall@10 from 0.95 to 1.00.
 
 Two changes the eval decided:
 
 - Matching any word instead of all of them lifted keyword search alone from 0.14 to 0.77 recall@10, but dropped hybrid from 1.00 to 0.93 and its MRR from 0.91 to 0.74, because fusion trusts a noisy leg as much as a precise one. It was reverted.
-- The reranker pushed bare CVE IDs out of the top 10, since it was trained on natural questions. Queries that look like an identifier now keep the hybrid order, which brought rerank's recall@10 from 0.96 to 1.00. Those IDs still land at ranks 2 to 4 rather than first.
+- The reranker pushed bare CVE IDs out of the top 10, since it was trained on natural questions. Queries that look like an identifier now keep the hybrid order, which brought rerank's recall@10 from 0.96 to 1.00. Those IDs still land second or third rather than first.
 
 ### LLM eval
 

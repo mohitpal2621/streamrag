@@ -17,8 +17,7 @@ const load = pipeline as (task: string, model: string, options: object) => Promi
 let asr: Promise<AutomaticSpeechRecognitionPipeline> | undefined;
 export const whisper: Recognize = async (samples) => {
   asr ??= load('automatic-speech-recognition', WHISPER_MODEL, { dtype: 'q8' }) as Promise<AutomaticSpeechRecognitionPipeline>;
-  const out = await (await asr)(samples, { chunk_length_s: 30, stride_length_s: 5, return_timestamps: true });
-  const chunks = (Array.isArray(out) ? out[0] : out).chunks ?? [];
+  const { chunks = [] } = await (await asr)(samples, { chunk_length_s: 30, stride_length_s: 5, return_timestamps: true });
   return chunks.map((c) => ({ start: c.timestamp[0], text: c.text.trim() })).filter((s) => s.text);
 };
 
