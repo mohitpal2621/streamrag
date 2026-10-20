@@ -137,12 +137,14 @@ The pipeline tests start Postgres, Redpanda and Redis with Testcontainers and ch
 ## Podcasts and talks
 
 1. The RSS connector treats an item with an audio enclosure as an episode and keeps its length from `itunes:duration`. The default sources include Software Engineering Daily; conference talks work the same way wherever there's an audio feed, like media.ccc.de's per-congress MP3 feeds.
-2. FFmpeg reads the episode straight from its URL, in whatever format, and writes 16 kHz mono 32-bit float samples to stdout: `ffmpeg -i <url> -vn -ac 1 -ar 16000 -f f32le pipe:1`. They arrive in five-minute blocks, so a three-hour episode never sits in memory whole, and `--minutes` stops the download early.
+2. FFmpeg reads the episode straight from its URL, in whatever format, and writes 16 kHz mono 32-bit float samples to stdout: `ffmpeg -i <url> -vn -ac 1 -ar 16000 -f f32le pipe:1`. They arrive in five-minute blocks, so a three-hour episode never sits in memory whole, and `--minutes` stops the download early. FFmpeg stops reading while Whisper works through a block, which is long enough for a CDN to drop the connection, so it runs with `-reconnect 1` and asks for the rest with a range request. A transcript that still ends more than 2% short of the feed's `itunes:duration` fails instead of being stored, so it gets retried.
 3. Whisper (`whisper-base.en` through transformers.js, on the CPU) turns each block into timed segments. Those get merged into paragraphs of about 30 seconds, each opening with its start time, so any chunk of a transcript says roughly where in the episode it is.
 4. The transcript is a document of its own, keyed like its episode, so sync, embedding, search and answers handle it with no special cases. Its URL is the audio file, and a search hit turns the first time mark in its chunk into a media fragment (`#t=1262`) that starts playback there.
 5. In the pipeline, a transcriber group handles new episodes as they arrive. A feed's first sync doesn't count, so adding a podcast doesn't queue its whole back catalogue; `npm run transcribe -- -n 5` does those on request.
 
-The newest Software Engineering Daily episode, 47 minutes long, came out at 9,347 words in 13.5 minutes on 2 CPU cores, about 3.5 times faster than real time, using about 1.4 GB of memory. Searching "branching timelines after a node crashes to explore different orders of events" then landed at 21:02, where the guest walks through it.
+A 49-minute SED News episode came out at 9,588 words in 18.5 minutes on 2 CPU cores, about 2.6 times faster than real time, using about 1.9 GB of memory. Before the reconnect, the same episode stopped at 9 minutes and was stored as if that were all of it. In an earlier 47-minute episode on software verification, searching "branching timelines after a node crashes to explore different orders of events" landed at 21:02, where the guest walks through it.
+
+Moving to transformers.js 4 made Whisper about 30% slower here, and on the same 10 minutes of audio it also found 10% more words, because 3.8 dropped the last seconds of each block.
 
 With the 3B model, an answer drawn from a transcript sometimes cites the episode's show notes instead, since the two share a title. `WHISPER_MODEL=Xenova/whisper-base` handles talks in other languages, and `whisper-tiny.en` is a little faster and less accurate.
 

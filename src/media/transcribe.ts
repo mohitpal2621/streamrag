@@ -31,7 +31,10 @@ const toSamples = (bytes: Buffer) => {
 // float samples at 16 kHz mono to stdout, which is what Whisper takes. They come out in blocks of a
 // few minutes, so a three-hour episode never sits in memory whole; -t stops the download early.
 export async function* decode(url: string, { maxSeconds, blockSeconds = 300 }: { maxSeconds?: number; blockSeconds?: number } = {}) {
-  const args = ['-nostdin', '-loglevel', 'error', ...(maxSeconds ? ['-t', String(maxSeconds)] : []), '-i', url];
+  // FFmpeg stops downloading while Whisper works through a block, and a server can drop a connection
+  // that sits idle that long. FFmpeg then asks for the rest with a range request.
+  const reconnect = /^https?:/i.test(url) ? ['-reconnect', '1', '-reconnect_on_network_error', '1', '-reconnect_delay_max', '30'] : [];
+  const args = ['-nostdin', '-loglevel', 'error', ...(maxSeconds ? ['-t', String(maxSeconds)] : []), ...reconnect, '-i', url];
   args.push('-vn', '-ac', '1', '-ar', String(RATE), '-f', 'f32le', 'pipe:1');
   const ff = spawn(process.env.FFMPEG_PATH ?? 'ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   try {
@@ -64,7 +67,11 @@ export async function* decode(url: string, { maxSeconds, blockSeconds = 300 }: {
   }
 }
 
-export async function transcribe(url: string, opts: { maxSeconds?: number; blockSeconds?: number; recognize?: Recognize; onProgress?: (seconds: number) => void } = {}) {
+type TranscribeOptions = { maxSeconds?: number; blockSeconds?: number; expectSeconds?: number; recognize?: Recognize; onProgress?: (seconds: number) => void };
+
+// expectSeconds is the episode's length from its feed. Audio that ends well short of it was cut off,
+// and half a transcript stored as the whole one would never be redone.
+export async function transcribe(url: string, opts: TranscribeOptions = {}) {
   const recognize = opts.recognize ?? whisper;
   const segments: Segment[] = [];
   let seconds = 0;
@@ -73,6 +80,7 @@ export async function transcribe(url: string, opts: { maxSeconds?: number; block
     seconds += block.length / RATE;
     opts.onProgress?.(seconds);
   }
+  if (opts.expectSeconds && seconds < opts.expectSeconds * 0.98) throw new Error(`the audio stopped at ${clock(seconds)} of ${clock(opts.expectSeconds)}`);
   return { segments, seconds };
 }
 
@@ -97,13 +105,14 @@ export function paragraphs(segments: Segment[], seconds = 30) {
   return out.join('\n');
 }
 
-type Episode = { id: string; feed: string; external_id: string; title: string; audio: string; published: string | null };
+type Episode = { id: string; feed: string; external_id: string; title: string; audio: string; published: string | null; duration: number | null };
 
 // Podcast episodes (RSS items with an audio enclosure) that have no transcript yet, newest first.
 // `ids` narrows it to particular documents.
 export async function untranscribed(db: pg.Pool, limit: number, ids?: string[]) {
   const { rows } = await db.query<Episode>(
-    `select d.id, d.feed, d.external_id, d.title, d.meta->>'audio' as audio, d.meta->>'published' as published
+    `select d.id, d.feed, d.external_id, d.title, d.meta->>'audio' as audio, d.meta->>'published' as published,
+            (d.meta->>'duration')::float as duration
      from documents d
      where d.meta ? 'audio' and d.closed_at is null and ($1::bigint[] is null or d.id = any($1))
        and not exists (select 1 from documents t where t.source = 'transcript' and t.feed = d.feed and t.external_id = d.external_id)`,
@@ -115,8 +124,8 @@ export async function untranscribed(db: pg.Pool, limit: number, ids?: string[]) 
 
 // A transcript is a document of its own, keyed like its episode, so the embedder and search take it
 // as it is. Its URL is the audio file, so a link can jump to a moment with #t=seconds.
-export async function transcribeEpisode(db: pg.Pool, episode: Episode, opts: Parameters<typeof transcribe>[1] = {}) {
-  const { segments, seconds } = await transcribe(episode.audio, opts);
+export async function transcribeEpisode(db: pg.Pool, episode: Episode, opts: TranscribeOptions = {}) {
+  const { segments, seconds } = await transcribe(episode.audio, { expectSeconds: opts.maxSeconds ? undefined : (episode.duration ?? undefined), ...opts });
   const body = paragraphs(segments);
   await syncFeed(db, 'transcript', episode.feed, [
     { externalId: episode.external_id, title: `${episode.title} (transcript)`, url: episode.audio, body, meta: { episode: episode.id, seconds: Math.round(seconds), model: WHISPER_MODEL } },

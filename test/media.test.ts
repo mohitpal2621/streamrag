@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -56,4 +58,35 @@ test('a missing ffmpeg says how to install it', async () => {
 
 test('a file ffmpeg cannot read fails with its reason', async () => {
   await assert.rejects(transcribe(join(dir, 'missing.mp3'), { recognize: async () => [] }), /ffmpeg exited with \d+: .*No such file/);
+});
+
+test('a download that drops part way is picked up where it stopped', async () => {
+  // Twenty seconds of MP3, served with range support by a server that cuts the first response off a
+  // third of the way in, the way a CDN drops a connection that sat idle while Whisper was busy.
+  const long = join(dir, 'long.mp3');
+  execFileSync('ffmpeg', ['-nostdin', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=20', '-ac', '1', '-ar', '16000', long]);
+  const audio = readFileSync(long);
+  let requests = 0;
+  const server = createServer((req, res) => {
+    requests++;
+    const start = Number(/bytes=(\d+)-/.exec(req.headers.range ?? '')?.[1] ?? 0);
+    const headers = { 'content-type': 'audio/mpeg', 'accept-ranges': 'bytes', 'content-length': audio.length - start };
+    res.writeHead(start ? 206 : 200, start ? { ...headers, 'content-range': `bytes ${start}-${audio.length - 1}/${audio.length}` } : headers);
+    if (requests === 1) res.write(audio.subarray(0, Math.floor(audio.length / 3)), () => res.socket?.destroy());
+    else res.end(audio.subarray(start));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    let samples = 0;
+    for await (const b of decode(`http://127.0.0.1:${(server.address() as AddressInfo).port}/long.mp3`, { blockSeconds: 5 })) samples += b.length;
+    assert.ok(Math.abs(samples - 20 * 16_000) < 16_000 / 10, `${samples / 16_000} s decoded`);
+    assert.ok(requests > 1);
+  } finally {
+    server.close();
+  }
+});
+
+test('audio that ends well before the episode length fails instead of storing part of it', async () => {
+  await assert.rejects(transcribe(wav, { recognize: async () => [], expectSeconds: 60 }), /the audio stopped at 0:03 of 1:00/);
+  assert.equal((await transcribe(wav, { recognize: async () => [], expectSeconds: 3 })).seconds, 3);
 });
