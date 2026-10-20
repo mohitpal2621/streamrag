@@ -3,8 +3,10 @@ import { askAgent, createAgent, type AgentEvent } from '../agent/graph.ts';
 import type { Deps } from '../agent/tools.ts';
 import { ask, type AnswerEvent } from '../core/answer.ts';
 import { search, type Mode } from '../core/search.ts';
-import { pipelineStatus } from '../pipeline/status.ts';
+import { usage } from '../llm/calls.ts';
+import { feeds, pipelineStatus } from '../pipeline/status.ts';
 import { breakingChanges } from '../upgrade.ts';
+import { documentActivity, listAlerts, pulse, type Activity, type Live } from './live.ts';
 
 const typeDefs = /* GraphQL */ `
   enum Mode {
@@ -43,19 +45,102 @@ const typeDefs = /* GraphQL */ `
   }
 
   type Alert {
+    id: ID!
     at: String!
     package: String!
     title: String!
     url: String
   }
 
+  type Lag {
+    group: String!
+    behind: Int!
+  }
+
+  type Syncs {
+    scheduled: Int!
+    waiting: Int!
+    active: Int!
+    delayed: Int!
+    failed: Int!
+  }
+
   type Status {
+    documents: Int!
+    chunks: Int!
     outbox: Int!
+    "how long the oldest unpublished event has waited, in seconds"
+    oldestOutboxSeconds: Int
     pendingEmbeddings: Int!
     alertsThisWeek: Int!
-    "null when Kafka is unreachable"
-    embedderLag: Int
+    "how far behind each consumer group is; null when Kafka is unreachable"
+    lag: [Lag!]
     deadLetters: Int
+    kafkaError: String
+    "null when Redis is unreachable"
+    syncs: Syncs
+    redisError: String
+  }
+
+  type Feed {
+    source: String!
+    feed: String!
+    documents: Int!
+    syncedAt: String!
+    "when the pipeline syncs it next; null when it isn't scheduled or Redis is unreachable"
+    nextSyncAt: String
+  }
+
+  type ModelUsage {
+    provider: String!
+    model: String!
+    ok: Int!
+    errors: Int!
+    skipped: Int!
+    avgMs: Int
+    p95Ms: Int
+    inputTokens: Int!
+    outputTokens: Int!
+  }
+
+  type Document {
+    id: ID!
+    source: String!
+    feed: String!
+    title: String!
+    url: String
+    "the start of its text"
+    snippet: String!
+    "whether its current version is embedded, and so findable by search"
+    searchable: Boolean!
+  }
+
+  enum Change {
+    added
+    changed
+    closed
+  }
+
+  type DocumentActivity {
+    id: ID!
+    at: String!
+    change: Change!
+    document: Document!
+  }
+  type Searchable {
+    at: String!
+    documentIds: [ID!]!
+  }
+  type NewAlert {
+    alert: Alert!
+  }
+  union Activity = DocumentActivity | Searchable | NewAlert
+
+  type PulseBucket {
+    "start of a 10-second bucket"
+    at: String!
+    source: String!
+    documents: Int!
   }
 
   type Source {
@@ -92,6 +177,13 @@ const typeDefs = /* GraphQL */ `
     upgrade(package: String!, from: String!, to: String): Upgrade!
     alerts(limit: Int = 20): [Alert!]!
     status: Status!
+    "Documents added, changed or closed lately, newest first."
+    recent(limit: Int = 50): [DocumentActivity!]!
+    "Documents added or changed per source, in 10-second buckets."
+    pulse(minutes: Int = 15): [PulseBucket!]!
+    feeds: [Feed!]!
+    "Model calls over the last 7 days."
+    usage: [ModelUsage!]!
   }
 
   type Subscription {
@@ -99,14 +191,18 @@ const typeDefs = /* GraphQL */ `
     ask(question: String!): AnswerEvent!
     "The agent's tool calls as it makes them, then its answer. Pass the same thread to ask a follow-up."
     agent(question: String!, thread: String): AgentEvent!
+    "Every document a sync adds, changes or closes as it commits, when documents become searchable, and new security alerts."
+    activity: Activity!
   }
 `;
 
 const snippet = (text: string) => text.slice(text.indexOf('\n') + 1, 300).replace(/\s+/g, ' ');
+const clamp = (n: number, max: number) => Math.min(Math.max(Math.trunc(n), 1), max);
 
 // GraphQL over HTTP, with GraphiQL at /graphql. Subscriptions stream over server-sent events, which
 // Yoga speaks out of the box, so a plain fetch or EventSource can read an answer as it's written.
-export function createApi(deps: Deps) {
+// Yoga allows any origin by default, which lets the dashboard on another port call it.
+export function createApi(deps: Deps, live: Live) {
   const agent = createAgent(deps);
   const passThrough = <T>(event: T) => event;
   return createYoga({
@@ -117,7 +213,7 @@ export function createApi(deps: Deps) {
       resolvers: {
         Query: {
           search: async (_: unknown, a: { query: string; mode: Mode; limit: number }) =>
-            (await search(deps.db, a.query, { mode: a.mode, limit: a.limit, embed: deps.embed, rerank: deps.rerank })).map((h) => ({
+            (await search(deps.db, a.query, { mode: a.mode, limit: clamp(a.limit, 50), embed: deps.embed, rerank: deps.rerank })).map((h) => ({
               ...h,
               snippet: snippet(h.text),
             })),
@@ -126,27 +222,33 @@ export function createApi(deps: Deps) {
             from: a.from,
             ...(await breakingChanges(deps.db, deps.gateway, a.package, a.from, a.to)),
           }),
-          alerts: async (_: unknown, a: { limit: number }) =>
-            (
-              await deps.db.query(
-                `select a.created_at as at, d.feed, d.title, d.url from alerts a join documents d on d.id = a.document_id
-                 order by a.id desc limit $1`,
-                [a.limit],
-              )
-            ).rows.map((r) => ({ at: r.at.toISOString(), package: r.feed.replace(/^npm\//, ''), title: r.title, url: r.url })),
+          alerts: (_: unknown, a: { limit: number }) => listAlerts(deps.db, { limit: clamp(a.limit, 500) }),
           status: async () => {
-            const s = await pipelineStatus(deps.db);
-            const k = 'unreachable' in s.kafka ? null : s.kafka;
-            return { ...s, embedderLag: k?.embedder ?? null, deadLetters: k?.deadLetters ?? null };
+            const { kafka, syncs, ...s } = await pipelineStatus(deps.db);
+            const k = 'unreachable' in kafka ? null : kafka;
+            return {
+              ...s,
+              lag: k && (['embedder', 'alerts', 'transcriber'] as const).map((group) => ({ group, behind: k[group] })),
+              deadLetters: k?.deadLetters ?? null,
+              kafkaError: 'unreachable' in kafka ? kafka.unreachable : null,
+              syncs: 'unreachable' in syncs ? null : syncs,
+              redisError: 'unreachable' in syncs ? syncs.unreachable : null,
+            };
           },
+          recent: (_: unknown, a: { limit: number }) => documentActivity(deps.db, { limit: clamp(a.limit, 500) }),
+          pulse: (_: unknown, a: { minutes: number }) => pulse(deps.db, clamp(a.minutes, 24 * 60)),
+          feeds: () => feeds(deps.db),
+          usage: () => usage(deps.db),
         },
         Subscription: {
           ask: { subscribe: (_: unknown, a: { question: string }) => ask(deps.db, a.question, deps), resolve: passThrough },
           agent: { subscribe: (_: unknown, a: { question: string; thread?: string }) => askAgent(agent, a.question, a.thread), resolve: passThrough },
+          activity: { subscribe: () => live.subscribe(), resolve: passThrough },
         },
         AnswerEvent: { __resolveType: (e: AnswerEvent) => ({ sources: 'AnswerSources', token: 'AnswerToken', done: 'AnswerDone' })[e.type] },
         AnswerSources: { sources: (e: Extract<AnswerEvent, { type: 'sources' }>) => e.sources.map((s, i) => ({ n: i + 1, title: s.title, url: s.url })) },
         AgentEvent: { __resolveType: (e: AgentEvent) => (e.type === 'tool' ? 'AgentToolCall' : 'AgentToken') },
+        Activity: { __resolveType: (e: Activity) => ({ document: 'DocumentActivity', searchable: 'Searchable', alert: 'NewAlert' })[e.type] },
       },
     }),
   });

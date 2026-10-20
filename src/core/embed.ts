@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { chunk } from './chunk.ts';
 import type { Embed } from './models.ts';
+import { notifyIds } from './store.ts';
 
 type Pending = { id: string; title: string; body: string; content_hash: string };
 
@@ -35,6 +36,7 @@ export async function embedDocs(db: pg.Pool, embed: Embed, docs: Pending[]) {
        from unnest($1::bigint[], $2::text[]) v(id, hash) where documents.id = v.id`,
       [docs.map((d) => d.id), docs.map((d) => d.content_hash)],
     );
+    await notifyIds(client, 'embedded', docs.map((d) => d.id)); // the dashboard marks them searchable
     await client.query('commit');
   } catch (err) {
     await client.query('rollback');

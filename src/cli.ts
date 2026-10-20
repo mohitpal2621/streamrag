@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { askAgent, createAgent } from './agent/graph.ts';
+import { listAlerts } from './api/live.ts';
 import { connectors } from './connectors/index.ts';
 import { ask } from './core/answer.ts';
 import { embedPending } from './core/embed.ts';
@@ -9,7 +10,7 @@ import { embed, rerank } from './core/models.ts';
 import { MODES, search } from './core/search.ts';
 import { connect, migrate } from './core/store.ts';
 import { clock, transcribeEpisode, untranscribed } from './media/transcribe.ts';
-import { loggedGateway } from './llm/calls.ts';
+import { loggedGateway, usage } from './llm/calls.ts';
 import { deadLetters } from './pipeline/dlq.ts';
 import { createProducer, TOPIC } from './pipeline/kafka.ts';
 import { pipelineStatus } from './pipeline/status.ts';
@@ -166,17 +167,7 @@ try {
     }
 
     case 'usage': {
-      const { rows } = await db.query(
-        `select provider, model,
-                count(*) filter (where status = 'ok')::int as ok,
-                count(*) filter (where status = 'error')::int as errors,
-                count(*) filter (where status = 'skipped')::int as skipped,
-                round(avg(latency_ms) filter (where status = 'ok'))::int as avg_ms,
-                coalesce(sum(input_tokens), 0)::int as input_tokens,
-                coalesce(sum(output_tokens), 0)::int as output_tokens
-         from llm_calls where created_at > now() - interval '7 days'
-         group by provider, model order by provider`,
-      );
+      const rows = await usage(db);
       if (rows.length) console.table(rows);
       else console.log('no model calls in the last 7 days');
       break;
@@ -195,6 +186,7 @@ try {
 
     case 'status': {
       const s = await pipelineStatus(db);
+      console.log(`documents   ${s.documents} open, in ${s.chunks} chunks`);
       console.log(`outbox      ${s.outbox} events waiting for the relay${s.oldestOutboxSeconds ? `, oldest ${s.oldestOutboxSeconds}s` : ''}`);
       console.log(`embeddings  ${s.pendingEmbeddings} documents waiting`);
       const k = s.kafka;
@@ -214,13 +206,9 @@ try {
     }
 
     case 'alerts': {
-      const { rows } = await db.query<{ at: Date; feed: string; title: string; url: string | null }>(
-        `select a.created_at as at, d.feed, d.title, d.url from alerts a join documents d on d.id = a.document_id
-         order by a.id desc limit $1`,
-        [limit],
-      );
+      const rows = await listAlerts(db, { limit });
       if (!rows.length) console.log('no alerts yet; they appear when an advisory is published for a package you track');
-      for (const r of rows) console.log(`${r.at.toISOString().slice(0, 16).replace('T', ' ')}  ${r.feed.replace(/^npm\//, '')}: ${r.title}  ${r.url ?? ''}`);
+      for (const r of rows) console.log(`${r.at.slice(0, 16).replace('T', ' ')}  ${r.package}: ${r.title}  ${r.url ?? ''}`);
       break;
     }
 

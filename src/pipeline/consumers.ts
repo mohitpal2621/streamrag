@@ -10,6 +10,7 @@ import {
 import type pg from 'pg';
 import { embedDocs, pendingDocs } from '../core/embed.ts';
 import type { Embed } from '../core/models.ts';
+import { notifyIds } from '../core/store.ts';
 import { clock, transcribeEpisode, untranscribed, type Recognize } from '../media/transcribe.ts';
 import { brokers, DLQ, TOPIC, type DocumentEvent } from './kafka.ts';
 
@@ -120,7 +121,8 @@ export const alerter =
         ]);
         if (fresh.rowCount) {
           const { rows } = await client.query<{ title: string; url: string | null }>('select title, url from documents where id = $1', [event.documentId]);
-          await client.query('insert into alerts (document_id) values ($1)', [event.documentId]);
+          const alert = await client.query<{ id: string }>('insert into alerts (document_id) values ($1) returning id', [event.documentId]);
+          await notifyIds(client, 'alert', [alert.rows[0].id]);
           const text = `New advisory for ${event.feed.replace(/^npm\//, '')}: ${rows[0].title} ${rows[0].url ?? ''}`.trim();
           log(`alerts: ${text}`);
           if (webhook) {

@@ -17,6 +17,15 @@ export async function migrate(db: pg.Pool) {
   await db.query(await readFile(new URL('../../db/schema.sql', import.meta.url), 'utf8'));
 }
 
+// Sends the ids on a NOTIFY channel, comma-separated, 500 to a notification to stay under Postgres's
+// 8,000-byte payload limit. Inside a transaction they go out on commit, and not at all on rollback.
+export const notifyIds = (client: pg.PoolClient, channel: string, ids: string[]) =>
+  client.query(
+    `select pg_notify($1, string_agg(id, ',')) from (select id, (row_number() over () - 1) / 500 as page from unnest($2::text[]) id) p
+     group by page`,
+    [channel, ids],
+  );
+
 const contentHash = (d: Doc) =>
   createHash('sha256').update(JSON.stringify([d.title, d.url, d.body, d.meta])).digest('hex');
 
@@ -67,11 +76,12 @@ export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: 
       ...(closed?.rows ?? []).map((r) => ({ type: 'document.closed', documentId: r.id, contentHash: r.content_hash, inserted: false })),
     ].map((e) => ({ ...e, source, feed, initial }));
     if (events.length) {
-      await client.query('insert into outbox (key, payload) select * from unnest($1::text[], $2::jsonb[])', [
-        events.map((e) => e.documentId),
-        events.map((e) => JSON.stringify(e)),
-      ]);
-      await client.query("select pg_notify('outbox', '')"); // delivered on commit, so the relay wakes at once
+      const { rows: ids } = await client.query<{ id: string }>(
+        'insert into outbox (key, payload) select * from unnest($1::text[], $2::jsonb[]) returning id',
+        [events.map((e) => e.documentId), events.map((e) => JSON.stringify(e))],
+      );
+      // Delivered on commit: the relay wakes at once, and the API reads these rows for its live feed.
+      await notifyIds(client, 'outbox', ids.map((r) => r.id));
     }
     await client.query('commit');
     const inserted = upserted.rows.filter((r) => r.inserted).length;
