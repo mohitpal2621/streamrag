@@ -1,12 +1,12 @@
 # streamrag
 
-A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Run as a streaming pipeline on Kafka, it makes new Hacker News comments searchable a couple of seconds after each one-minute poll finds them. It answers through a CLI, a GraphQL API that streams, an MCP server for coding assistants, and a LangGraph agent that looks things up before it answers.
+A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Run as a streaming pipeline on Kafka, it makes new Hacker News comments searchable a couple of seconds after each one-minute poll finds them. It answers through a CLI, a GraphQL API that streams, an MCP server for coding assistants and a LangGraph agent that looks things up before it answers. A Next.js dashboard shows documents arriving and becoming searchable as it happens.
 
 It ships with four kinds of sources: engineering blogs and release notes over RSS, Hacker News as a live stream, a dependency radar that follows the release notes and security advisories of every package in your `package.json`, and developer podcasts, transcribed locally with FFmpeg and Whisper so search can land on the minute a topic comes up.
 
 Everything runs on free, open-source tools, including the models. Answers come from a model on your own machine through Ollama, and the free tiers of Gemini and Groq can be added as fallbacks.
 
-## What works today (phases 1 to 6)
+## What works today (phases 1 to 7)
 
 - Connectors for RSS and Atom feeds, Hacker News (through its Algolia API) and OSV.dev security advisories. The default `sources.json` follows 30 engineering and release blogs plus the latest Hacker News stories and comments, about 5,600 documents on a first run.
 - Dependency radar. `npm run track -- path/to/package.json` adds each dependency's security advisories and, when the package lives on GitHub, its release notes.
@@ -21,6 +21,7 @@ Everything runs on free, open-source tools, including the models. Answers come f
 - A streaming pipeline. `npm run pipeline` syncs each source on its own BullMQ schedule, writes every change and its event in one transaction (the outbox pattern), publishes the events to Kafka, and lets consumer groups embed new documents and alert on new security advisories, with a dead-letter topic for events that keep failing.
 - APIs. `npm run serve` is a GraphQL API whose answers stream as server-sent events, and `npm run mcp` is an MCP server, so Claude Code, Claude Desktop or Cursor can search your sources and check upgrades and advisories while they work.
 - An agent. `npm run agent` is a LangGraph graph around native tool calling: the model calls `breaking_changes`, `security_advisories` or `search`, reads the results and answers, and each thread remembers its earlier questions.
+- A live dashboard. `web/` is a Next.js app that shows each document as its sync commits and again when it becomes searchable, with how long that took, next to the pipeline's backlog, new security alerts, each feed's next sync and the model calls. Its Ask page streams cited answers and the agent's tool calls.
 - Podcasts and talks. Any RSS item with an audio file is an episode. `npm run transcribe` streams it through FFmpeg into Whisper and stores a transcript with a time mark about every 30 seconds, so search results and citations link to the moment (`episode.mp3#t=1262`). In the pipeline, new episodes get transcribed as they arrive.
 
 ## Quick start
@@ -46,6 +47,7 @@ npm run pipeline                          # keep everything in sync as events; C
 npm run status                            # outbox backlog, Kafka lag, dead letters, sync jobs
 npm run serve                             # GraphQL, with GraphiQL at http://localhost:4000/graphql
 npm run mcp                               # MCP server over stdio, for coding assistants
+cd web && npm install && npm run dev      # the dashboard at http://localhost:3000, while npm run serve runs
 ```
 
 The first `ingest` downloads two small models (about 56 MB, kept in `node_modules`) and embeds every document once. For the default sources that's about 15,000 chunks, which took around half an hour on a 2-core machine and goes faster with more cores. After that, each run only embeds what changed.
@@ -167,6 +169,33 @@ Tool calling goes through the same gateway as everything else, with the same ret
 
 Llama 3.2 3B on 2 CPU cores answered "What breaks if I upgrade express from 5.0.0 to the latest version?" in about three minutes. It made three tool calls and came back with no breaking changes in 5.1.0 through 5.3.0, no advisories for 5.0.0, and a link to the release notes. The first tries showed what a small model sends: `"to": "latest"` and `"limit": "5"` as a string, so the tools now accept both. Each tool result also opens with a one-line verdict now; before that, the model's answer skipped what the tool had found and suggested searching instead.
 
+## The dashboard
+
+`web/` is a Next.js app with two pages. With the API running (`npm run serve`):
+
+```bash
+cd web
+npm install
+npm run dev       # http://localhost:3000; or npm run build && npm start
+```
+
+It talks to `http://localhost:4000/graphql`, from the Next.js server for the first render and from the browser after that; `API_URL` points it somewhere else.
+
+- Live: bars for every 10 seconds of the last 15 minutes show what synced, colored by source; Hacker News, polled every minute, keeps the beat. Below them, each document a sync adds, changes or closes appears as the sync commits, and its state turns to searchable once the embedder has stored its chunks, with the time that took. Beside the feed are the pipeline's backlog (outbox, embeddings, consumer lag, dead letters, sync jobs), security alerts as they're raised, each feed's last and next sync, and the model calls of the last week with p95 latency and tokens.
+- Ask: a streamed answer whose `[n]` citations link to their sources, or the agent, which lists its tool calls as it makes them and keeps the conversation for follow-ups. It can also just search.
+
+How a change gets to the browser:
+
+1. A sync sends a `NOTIFY` with the ids of its outbox rows, inside the transaction that writes them, so the notification goes out exactly when the change commits and not at all if it rolls back. The embedder does the same when it commits chunks, and the alerts consumer when it commits an alert. Ids go 500 to a notification, under Postgres's 8,000-byte payload limit.
+2. The API keeps one `LISTEN` connection, reads the rows each notification names, and fans the events out to every client of the `activity` subscription over server-sent events. It handles one notification at a time, so the feed keeps commit order, and listens again two seconds after its connection drops.
+3. The page is rendered on the server with the current state (React Server Components), and the browser then follows the stream with `fetch`. When the stream drops, the page says it's reconnecting, retries with backoff, and reloads recent activity once it's back, since whatever committed in between was never sent.
+
+The status, feeds and model usage are polled, every 5 to 60 seconds.
+
+With the pipeline running on the live corpus, a document synced by hand appeared in the browser within 0.3 seconds of starting the sync and was searchable 0.1 seconds after its commit, by way of the relay, Kafka and the embedder. A first poll that brought in 251 Hacker News comments took about a minute to clear, 64 at a time.
+
+`cd web && npm test` builds the dashboard and runs Playwright against it and the real API on a Testcontainers Postgres, with stand-in models. The tests check the first render, a sync appearing and turning searchable, a new alert, the page explaining how to start the API while it's down and reconnecting when it's back, and answers, agent follow-ups and search. With the live stream ignored on purpose, the three live tests fail.
+
 ## Eval
 
 `npm run eval` starts its own Postgres in Docker, pulls the current OSV advisories for 40 popular npm packages, embeds them, and asks 56 questions in every mode. The questions are written the way a developer would ask them, mostly without the advisory's own wording, and each lists the advisories that answer it. A few are bare CVE IDs, which keyword search is good at and embeddings are not.
@@ -222,7 +251,7 @@ src/
   pipeline/     schedules and locks (BullMQ, Redis), the outbox relay, consumers and dead letters (Kafka)
   media/        FFmpeg decoding and Whisper transcripts
   agent/        the tools and the LangGraph agent
-  api/          GraphQL (Yoga) and MCP servers; serve.ts and mcp.ts start them
+  api/          GraphQL (Yoga) and MCP servers and the live activity stream; serve.ts and mcp.ts start them
   track.ts      turns a package.json into sources
   upgrade.ts    finds the releases an upgrade crosses and their notes
   cli.ts
@@ -230,6 +259,7 @@ src/
 db/schema.sql
 eval/queries.json
 eval/llm/       the promptfoo eval, with its own package.json
+web/            the Next.js dashboard and its Playwright tests, with their own package.json
 ```
 
 - Every source lands in one `documents` table, keyed by `(source, feed, external_id)`. Retrieval works on a `chunks` table.
@@ -239,7 +269,7 @@ eval/llm/       the promptfoo eval, with its own package.json
 - The cache is a table too. Each row of `answers` keeps the question's embedding (HNSW-indexed), the numbered sources with their content hashes, and which of them the answer cited.
 - Ollama, Gemini and Groq all offer an OpenAI-compatible chat API, so one small client (`fetch` plus a server-sent events parser) covers all three without an SDK.
 - Fetching is polite: one request a second, an identifying User-Agent, public endpoints only.
-- The tests run against real Postgres, Redpanda and Redis through Testcontainers, locally and in GitHub Actions, with stand-in models, a scripted gateway and faked npm and GitHub responses, so CI downloads no model and calls none.
+- The tests run against real Postgres, Redpanda and Redis through Testcontainers, locally and in GitHub Actions, with stand-in models, a scripted gateway and faked npm and GitHub responses, so CI downloads no model and calls none. The dashboard's Playwright tests run in CI too, in Chromium.
 
 ## Roadmap
 
@@ -249,7 +279,7 @@ eval/llm/       the promptfoo eval, with its own package.json
 4. Event pipeline: Kafka (Redpanda) with Hacker News as the live stream, the outbox pattern, idempotent consumers, a dead-letter topic, BullMQ schedules and Redis locks (done)
 5. Media connector: FFmpeg and Whisper turn dev podcasts and conference talks into timestamped, searchable text, and answers link to the exact moment (done)
 6. APIs: GraphQL, streamed answers, a LangGraph agent and an MCP server, so coding assistants can ask about your dependencies (done)
-7. Web dashboard (Next.js) with live updates
+7. Web dashboard (Next.js) with live updates (done)
 8. Observability and load testing: OpenTelemetry, Langfuse, Prometheus, Grafana, k6 and Playwright
 
 ## Data
