@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Consumer, MessagesStreamModes, stringDeserializers, type Message, type Producer } from '@platformatic/kafka';
@@ -11,7 +15,7 @@ import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import type { Embed } from '../src/core/models.ts';
 import { connect, migrate, syncFeed, type Doc } from '../src/core/store.ts';
-import { alerter, embedder, startConsumer, type Handler } from '../src/pipeline/consumers.ts';
+import { alerter, embedder, startConsumer, transcriber, type Handler } from '../src/pipeline/consumers.ts';
 import { deadLetters } from '../src/pipeline/dlq.ts';
 import { createProducer, ensureTopics, lag, TOPIC } from '../src/pipeline/kafka.ts';
 import { drainOutbox, startRelay } from '../src/pipeline/relay.ts';
@@ -183,6 +187,29 @@ test('a new advisory alerts once, through the webhook too, and a first sync aler
   } finally {
     await consumer.stop();
     server.close();
+  }
+});
+
+test('a new podcast episode gets transcribed, while the back catalogue from a first sync does not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'streamrag-podcast-'));
+  const audio = join(dir, 'episode.wav');
+  execFileSync('ffmpeg', ['-nostdin', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=duration=1', audio]);
+  const episode = (id: string): Doc => ({ externalId: id, title: id, url: null, body: 'show notes', meta: { published: null, audio } });
+  let heard = 0;
+  const consumer = await startConsumer('transcriber-test', transcriber(db, quiet, async () => (heard++, [{ start: 0, text: 'hello from the episode' }])), producer, quiet, {
+    bootstrapBrokers: brokers,
+  });
+  try {
+    await syncFeed(db, 'rss', 'https://pod.example/rss', [episode('back catalogue')], false);
+    await syncFeed(db, 'rss', 'https://pod.example/rss', [episode('back catalogue'), episode('brand new')], false);
+    await drainOutbox(db, producer);
+    await caughtUp('transcriber-test');
+    const { rows } = await db.query<{ title: string; body: string }>(`select title, body from documents where source = 'transcript'`);
+    assert.deepEqual(rows, [{ title: 'brand new (transcript)', body: '[0:00] hello from the episode' }]);
+    assert.equal(heard, 1);
+  } finally {
+    await consumer.stop();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

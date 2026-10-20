@@ -1,6 +1,7 @@
 // npm run pipeline: the streaming side of streamrag. BullMQ syncs every source on a schedule, each
 // sync writes its documents and their outbox events in one transaction, the relay publishes the
-// events to Kafka, and two consumer groups embed what changed and raise advisory alerts.
+// events to Kafka, and consumer groups embed what changed, raise advisory alerts and transcribe new
+// podcast episodes.
 // --only picks roles, so each one can run, and scale, as its own process.
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
@@ -9,12 +10,12 @@ import { Redis } from 'ioredis';
 import { connectors } from '../connectors/index.ts';
 import { embed } from '../core/models.ts';
 import { connect } from '../core/store.ts';
-import { alerter, embedder, startConsumer } from './consumers.ts';
+import { alerter, embedder, startConsumer, transcriber } from './consumers.ts';
 import { createProducer, ensureTopics } from './kafka.ts';
 import { startRelay } from './relay.ts';
 import { scheduleSyncs, startSyncWorker, SYNC_QUEUE, type ScheduledSource } from './scheduler.ts';
 
-const ROLES = ['scheduler', 'relay', 'embedder', 'alerts'];
+const ROLES = ['scheduler', 'relay', 'embedder', 'alerts', 'transcriber'];
 const { values } = parseArgs({ options: { only: { type: 'string' } } });
 const roles = values.only?.split(',').map((r) => r.trim()) ?? ROLES;
 const unknown = roles.filter((r) => !ROLES.includes(r));
@@ -43,9 +44,9 @@ if (roles.includes('scheduler')) {
   stops.push(() => worker.close(), () => queue.close(), () => redis.quit());
 }
 if (roles.includes('relay')) stops.push(await startRelay(db, producer, log));
-for (const [role, handler] of [['embedder', embedder(db, embed, log)], ['alerts', alerter(db, log)]] as const) {
+for (const [role, handler] of [['embedder', embedder(db, embed, log)], ['alerts', alerter(db, log)], ['transcriber', transcriber(db, log)]] as const) {
   if (!roles.includes(role)) continue;
-  // Embedding is cheaper per document in batches; alerts go one at a time.
+  // Embedding is cheaper per document in batches; the others go one event at a time.
   const consumer = await startConsumer(role, handler, producer, log, { batchSize: role === 'embedder' ? 64 : 1 });
   consumer.done.catch(fatal(role));
   stops.push(consumer.stop);

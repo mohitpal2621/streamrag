@@ -74,8 +74,15 @@ export async function search(db: pg.Pool, query: string, opts: { mode: Mode; lim
   for (const c of chunks) {
     if (seen.has(c.documentId)) continue;
     seen.add(c.documentId);
-    hits.push(c);
+    hits.push(atMoment(c));
     if (hits.length === opts.limit) break;
   }
   return hits;
+}
+
+// A transcript's URL is its audio file. The first time mark in the chunk ([12:34]) becomes a media
+// fragment, so the link starts playback at that moment.
+function atMoment(hit: Hit): Hit {
+  const m = hit.source === 'transcript' && hit.url ? hit.text.match(/\[(?:(\d+):)?(\d+):(\d\d)\]/) : null;
+  return m ? { ...hit, url: `${hit.url}#t=${Number(m[1] ?? 0) * 3600 + Number(m[2]) * 60 + Number(m[3])}` } : hit;
 }

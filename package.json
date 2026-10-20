@@ -21,6 +21,7 @@
     "status": "node --env-file-if-exists=.env src/cli.ts status",
     "alerts": "node --env-file-if-exists=.env src/cli.ts alerts",
     "dlq": "node --env-file-if-exists=.env src/cli.ts dlq",
+    "transcribe": "node --env-file-if-exists=.env src/cli.ts transcribe",
     "typecheck": "tsc",
     "test": "node --test \"test/**/*.test.ts\""
   },

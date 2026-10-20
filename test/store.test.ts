@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { ask, type AnswerEvent } from '../src/core/answer.ts';
@@ -8,6 +12,7 @@ import type { Embed, Rerank } from '../src/core/models.ts';
 import { search } from '../src/core/search.ts';
 import { connect, migrate, syncFeed, type Doc } from '../src/core/store.ts';
 import type { Message } from '../src/llm/openai.ts';
+import { transcribeEpisode, untranscribed, type Recognize } from '../src/media/transcribe.ts';
 import { breakingChanges } from '../src/upgrade.ts';
 
 let container: StartedPostgreSqlContainer;
@@ -263,5 +268,38 @@ describe('breaking changes', () => {
       ['5.0.0', undefined, "GitHub's API limit for this hour is used up (it resets at …); a GITHUB_TOKEN raises it"],
     ]);
     assert.equal(requested.filter((u) => u.startsWith('https://api.github.com/')).length, 4); // three tags for 3.0.0, one for 4.0.0
+  });
+});
+
+describe('podcast transcripts', () => {
+  test('episodes get transcribed newest first, once each, and search links to the moment', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'streamrag-episode-'));
+    const audio = join(dir, 'episode.wav');
+    execFileSync('ffmpeg', ['-nostdin', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=duration=2', audio]);
+    try {
+      const episode = (id: string, published: string): Doc => ({ externalId: id, title: id, url: null, body: 'show notes', meta: { published, audio } });
+      await syncFeed(db, 'rss', 'https://pod.example/feed', [
+        episode('Older episode', 'Mon, 05 Oct 2026 10:00:00 GMT'),
+        episode('Newer episode', 'Mon, 19 Oct 2026 10:00:00 GMT'),
+        doc('post', 'a blog post, no audio'),
+      ], false);
+      const waiting = await untranscribed(db, 5);
+      assert.deepEqual(waiting.map((e) => e.title), ['Newer episode', 'Older episode']);
+
+      // Enough talk before the Kafka part that it lands in the second chunk, which opens at 1:05.
+      const recognize: Recognize = async () => [
+        { start: 0, text: 'word '.repeat(250).trim() },
+        { start: 65, text: 'kafka consumer groups explained' },
+      ];
+      await transcribeEpisode(db, waiting[0], { recognize });
+      assert.deepEqual((await untranscribed(db, 5)).map((e) => e.title), ['Older episode']);
+
+      await embedPending(db, fakeEmbed);
+      const hits = await search(db, 'kafka', { mode: 'vector', limit: 10, embed: fakeEmbed, rerank: fakeRerank });
+      const transcript = hits.find((h) => h.source === 'transcript');
+      assert.deepEqual([transcript?.title, transcript?.url], ['Newer episode (transcript)', `${audio}#t=65`]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

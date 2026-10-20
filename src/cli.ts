@@ -9,6 +9,7 @@ import { ingest, type Source } from './core/ingest.ts';
 import { embed, rerank } from './core/models.ts';
 import { MODES, search } from './core/search.ts';
 import { connect, migrate } from './core/store.ts';
+import { clock, transcribeEpisode, untranscribed } from './media/transcribe.ts';
 import { createGateway } from './llm/gateway.ts';
 import { providersFromEnv } from './llm/providers.ts';
 import { deadLetters } from './pipeline/dlq.ts';
@@ -31,8 +32,10 @@ const USAGE = `usage:
   npm run status                        pipeline backlog: outbox, Kafka lag, dead letters, sync jobs
   npm run alerts                        new security advisories the pipeline noticed
   npm run dlq [-- --replay]             list dead-lettered events, or send them back to be retried
+  npm run transcribe [-- -n 2 --minutes 10]
+                                        transcribe the newest podcast episodes without a transcript (FFmpeg + Whisper)
 options:
-  -n, --limit <count>                   how many search results to show (default 10)
+  -n, --limit <count>                   how many results, alerts or episodes (default 10, or 1 to transcribe)
   -m, --mode <mode>                     keyword, vector, hybrid or rerank (default rerank)`;
 
 const SOURCES_FILE = new URL('../sources.json', import.meta.url);
@@ -40,13 +43,14 @@ const SOURCES_FILE = new URL('../sources.json', import.meta.url);
 const { positionals, values } = parseArgs({
   allowPositionals: true,
   options: {
-    limit: { type: 'string', short: 'n', default: '10' },
+    limit: { type: 'string', short: 'n' },
     mode: { type: 'string', short: 'm', default: 'rerank' },
     replay: { type: 'boolean', default: false },
+    minutes: { type: 'string' },
   },
 });
 const [command, arg, ...rest] = positionals;
-const limit = Number(values.limit);
+const limit = Number(values.limit ?? (command === 'transcribe' ? 1 : 10));
 const mode = MODES.find((m) => m === values.mode);
 
 const db = connect();
@@ -115,6 +119,23 @@ try {
           if (ev.invalid.length) console.log(`(ignored citations to sources that don't exist: ${ev.invalid.join(', ')})`);
           if (ev.provider) console.log(ev.cached ? `\ncached answer, first written by ${ev.provider}` : `\nanswered by ${ev.provider}`);
         }
+      }
+      break;
+    }
+
+    case 'transcribe': {
+      const minutes = values.minutes === undefined ? undefined : Number(values.minutes);
+      if (minutes !== undefined && !(minutes > 0)) throw new Error('--minutes must be a positive number');
+      const episodes = await untranscribed(db, limit);
+      if (!episodes.length) console.log('no podcast episodes without a transcript; add a podcast feed to sources.json and run npm run ingest');
+      for (const ep of episodes) {
+        const started = Date.now();
+        console.log(`${ep.title}\n  ${ep.audio}`);
+        const { seconds, words } = await transcribeEpisode(db, ep, {
+          maxSeconds: minutes && minutes * 60,
+          onProgress: (s) => process.stdout.write(`\r  ${clock(s)} transcribed`),
+        });
+        console.log(`\r  ${clock(seconds)} of audio, ${words} words, in ${clock((Date.now() - started) / 1000)}; run npm run ingest to make it searchable`);
       }
       break;
     }

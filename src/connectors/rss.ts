@@ -10,7 +10,7 @@ const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@',
   parseTagValue: false, // keep "2024" a string, not a number
-  isArray: (name) => name === 'item' || name === 'entry' || name === 'link',
+  isArray: (name) => name === 'item' || name === 'entry' || name === 'link' || name === 'enclosure',
   stopNodes: ['*.title', '*.description', '*.content', '*.summary', '*.content:encoded'],
 });
 
@@ -38,6 +38,15 @@ function linkOf(links: any[] = []): string | null {
   return (links.find((l) => !l['@rel'] || l['@rel'] === 'alternate') ?? links[0])?.['@href'] ?? null;
 }
 
+// A podcast episode is an item with an audio enclosure. itunes:duration comes as seconds, MM:SS or HH:MM:SS.
+function audioOf(item: any): { audio: string; duration?: number } | null {
+  const enclosure = (item.enclosure ?? []).find((e: any) => String(e['@type'] ?? '').startsWith('audio/') || /\.(mp3|m4a|ogg|opus|wav)(\?|$)/i.test(e['@url'] ?? ''));
+  if (!enclosure?.['@url']) return null;
+  const parts = raw(item['itunes:duration']).split(':').map(Number);
+  const duration = parts.every(Number.isFinite) ? parts.reduce((total, n) => total * 60 + n, 0) : 0;
+  return { audio: enclosure['@url'], ...(duration > 0 ? { duration } : {}) };
+}
+
 export function normalize(xml: string): Doc[] {
   const doc = parser.parse(xml);
   const items = doc.rss?.channel ? (doc.rss.channel.item ?? []) : doc.feed ? (doc.feed.entry ?? []) : null;
@@ -51,7 +60,7 @@ export function normalize(xml: string): Doc[] {
       title: toText(item.title, 'text'),
       url,
       body: toText(item['content:encoded'] || item.description || item.content || item.summary, 'html'),
-      meta: { published: raw(item.pubDate) || raw(item.published) || raw(item.updated) || null },
+      meta: { published: raw(item.pubDate) || raw(item.published) || raw(item.updated) || null, ...audioOf(item) },
     }];
   });
 }

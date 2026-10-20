@@ -120,6 +120,10 @@
     "feed": "https://go.dev/blog/feed.atom"
   },
   {
+    "connector": "rss",
+    "feed": "https://softwareengineeringdaily.com/feed/podcast/"
+  },
+  {
     "connector": "hackernews",
     "feed": "story"
   },

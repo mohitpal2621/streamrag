@@ -14,5 +14,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg)
       - run: npm run typecheck
       - run: npm test # Testcontainers starts Postgres, Redpanda and Redis for the store and pipeline tests

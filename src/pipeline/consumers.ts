@@ -10,6 +10,7 @@ import {
 import type pg from 'pg';
 import { embedDocs, pendingDocs } from '../core/embed.ts';
 import type { Embed } from '../core/models.ts';
+import { clock, transcribeEpisode, untranscribed, type Recognize } from '../media/transcribe.ts';
 import { brokers, DLQ, TOPIC, type DocumentEvent } from './kafka.ts';
 
 export type Handler = (events: DocumentEvent[]) => Promise<void>;
@@ -139,5 +140,21 @@ export const alerter =
       } finally {
         client.release();
       }
+    }
+  };
+
+// Transcribes new podcast episodes as they arrive. A feed's first sync is left to npm run transcribe,
+// so adding a podcast doesn't queue its whole back catalogue. An episode that already has a
+// transcript is skipped, so a repeated event costs nothing.
+export const transcriber =
+  (db: pg.Pool, log: Log, recognize?: Recognize): Handler =>
+  async (events) => {
+    for (const event of events) {
+      if (event.type !== 'document.changed' || !event.inserted || event.initial) continue;
+      const [episode] = await untranscribed(db, 1, [event.documentId]);
+      if (!episode) continue;
+      log(`transcriber: ${episode.title}`);
+      const { seconds } = await transcribeEpisode(db, episode, { recognize });
+      log(`transcriber: ${clock(seconds)} of ${episode.title} done`);
     }
   };

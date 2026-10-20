@@ -29,6 +29,25 @@ test('rss reads RSS 2.0 items, preferring the full content', () => {
   ]);
 });
 
+test('rss marks podcast episodes by their audio enclosure and length', () => {
+  const docs = rss.normalize(`<?xml version="1.0"?>
+    <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Dev Show</title>
+      <item><title>Ep 1</title><guid>ep-1</guid><itunes:duration>47:05</itunes:duration>
+        <enclosure url="https://cdn.example/ep1.mp3" length="1" type="audio/mpeg"/></item>
+      <item><title>Ep 2</title><guid>ep-2</guid><itunes:duration>3725</itunes:duration>
+        <enclosure url="https://cdn.example/ep2.m4a?x=1" length="1"/></item>
+      <item><title>Slides</title><guid>slides</guid><enclosure url="https://cdn.example/deck.pdf" type="application/pdf"/></item>
+    </channel></rss>`);
+  assert.deepEqual(
+    docs.map((d) => d.meta),
+    [
+      { published: null, audio: 'https://cdn.example/ep1.mp3', duration: 2_825 },
+      { published: null, audio: 'https://cdn.example/ep2.m4a?x=1', duration: 3_725 },
+      { published: null },
+    ],
+  );
+});
+
 test('rss reads Atom entries like GitHub release feeds', () => {
   const docs = rss.normalize(`<?xml version="1.0" encoding="UTF-8"?>
     <feed xmlns="http://www.w3.org/2005/Atom"><title>Releases</title>
