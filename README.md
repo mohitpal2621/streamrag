@@ -2,11 +2,11 @@
 
 A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Run as a streaming pipeline on Kafka, it makes new Hacker News comments searchable a couple of seconds after each one-minute poll finds them. Later phases add agents on top.
 
-It ships with three kinds of sources: engineering blogs and release notes over RSS, Hacker News as a live stream, and a dependency radar that follows the release notes and security advisories of every package in your `package.json`.
+It ships with four kinds of sources: engineering blogs and release notes over RSS, Hacker News as a live stream, a dependency radar that follows the release notes and security advisories of every package in your `package.json`, and developer podcasts, transcribed locally with FFmpeg and Whisper so search can land on the minute a topic comes up.
 
 Everything runs on free, open-source tools, including the models. Answers come from a model on your own machine through Ollama, and the free tiers of Gemini and Groq can be added as fallbacks.
 
-## What works today (phases 1 to 4)
+## What works today (phases 1 to 5)
 
 - Connectors for RSS and Atom feeds, Hacker News (through its Algolia API) and OSV.dev security advisories. The default `sources.json` follows 30 engineering and release blogs plus the latest Hacker News stories and comments, about 5,600 documents on a first run.
 - Dependency radar. `npm run track -- path/to/package.json` adds each dependency's security advisories and, when the package lives on GitHub, its release notes.
@@ -19,10 +19,11 @@ Everything runs on free, open-source tools, including the models. Answers come f
 - What breaks when you upgrade. `npm run upgrade -- express 4.21.0 5.0.0` reads the release notes of every major and minor release in between, has the model pull out the breaking changes as JSON, and stores them, so a release is only read once.
 - An LLM eval with promptfoo that scores the model on both jobs: cited answers and reading breaking changes out of release notes.
 - A streaming pipeline. `npm run pipeline` syncs each source on its own BullMQ schedule, writes every change and its event in one transaction (the outbox pattern), publishes the events to Kafka, and lets consumer groups embed new documents and alert on new security advisories, with a dead-letter topic for events that keep failing.
+- Podcasts and talks. Any RSS item with an audio file is an episode. `npm run transcribe` streams it through FFmpeg into Whisper and stores a transcript with a time mark about every 30 seconds, so search results and citations link to the moment (`episode.mp3#t=1262`). In the pipeline, new episodes get transcribed as they arrive.
 
 ## Quick start
 
-Needs Node 22.22+ and Docker, plus [Ollama](https://ollama.com) for answers.
+Needs Node 22.22+ and Docker, plus [Ollama](https://ollama.com) for answers and [FFmpeg](https://ffmpeg.org) for podcasts.
 
 ```bash
 npm install
@@ -33,6 +34,7 @@ npm run search -- "how do teams avoid cache stampedes"
 ollama pull llama3.2:3b                   # the default answer model, about 2 GB
 npm run ask -- "how does Cloudflare D1 scale to millions of databases?"
 npm run upgrade -- express 4.21.0 5.0.0   # what breaks between two versions
+npm run transcribe                        # the newest podcast episode; npm run ingest then embeds it
 npm run usage                             # model calls, errors, latency and tokens
 npm run track -- ../my-app/package.json   # then run npm run ingest again
 npm run eval                              # score every search mode
@@ -122,6 +124,18 @@ On 2 CPU cores, a Hacker News poll that found 28 new comments had them embedded 
 
 The pipeline tests start Postgres, Redpanda and Redis with Testcontainers and check each of these guarantees, from a failed sync leaving no events to a dead letter replaying exactly once. With a stand-in embedder, a sync commit is searchable about 200 ms later.
 
+## Podcasts and talks
+
+1. The RSS connector treats an item with an audio enclosure as an episode and keeps its length from `itunes:duration`. The default sources include Software Engineering Daily; conference talks work the same way wherever there's an audio feed, like media.ccc.de's per-congress MP3 feeds.
+2. FFmpeg reads the episode straight from its URL, in whatever format, and writes 16 kHz mono 32-bit float samples to stdout: `ffmpeg -i <url> -vn -ac 1 -ar 16000 -f f32le pipe:1`. They arrive in five-minute blocks, so a three-hour episode never sits in memory whole, and `--minutes` stops the download early.
+3. Whisper (`whisper-base.en` through transformers.js, on the CPU) turns each block into timed segments. Those get merged into paragraphs of about 30 seconds, each opening with its start time, so any chunk of a transcript says roughly where in the episode it is.
+4. The transcript is a document of its own, keyed like its episode, so sync, embedding, search and answers handle it with no special cases. Its URL is the audio file, and a search hit turns the first time mark in its chunk into a media fragment (`#t=1262`) that starts playback there.
+5. In the pipeline, a transcriber group handles new episodes as they arrive. A feed's first sync doesn't count, so adding a podcast doesn't queue its whole back catalogue; `npm run transcribe -- -n 5` does those on request.
+
+The newest Software Engineering Daily episode, 47 minutes long, came out at 9,347 words in 13.5 minutes on 2 CPU cores, about 3.5 times faster than real time, using about 1.4 GB of memory. Searching "branching timelines after a node crashes to explore different orders of events" then landed at 21:02, where the guest walks through it.
+
+With the 3B model, an answer drawn from a transcript sometimes cites the episode's show notes instead, since the two share a title. `WHISPER_MODEL=Xenova/whisper-base` handles talks in other languages, and `whisper-tiny.en` is a little faster and less accurate.
+
 ## Eval
 
 `npm run eval` starts its own Postgres in Docker, pulls the current OSV advisories for 40 popular npm packages, embeds them, and asks 56 questions in every mode. The questions are written the way a developer would ask them, mostly without the advisory's own wording, and each lists the advisories that answer it. A few are bare CVE IDs, which keyword search is good at and embeddings are not.
@@ -175,6 +189,7 @@ src/
   connectors/   one file per source type: rss, hackernews, osv
   llm/          the gateway, a streaming client for OpenAI-compatible APIs, provider settings
   pipeline/     schedules and locks (BullMQ, Redis), the outbox relay, consumers and dead letters (Kafka)
+  media/        FFmpeg decoding and Whisper transcripts
   track.ts      turns a package.json into sources
   upgrade.ts    finds the releases an upgrade crosses and their notes
   cli.ts
@@ -199,11 +214,11 @@ eval/llm/       the promptfoo eval, with its own package.json
 2. Embeddings with pgvector, hybrid keyword + vector search, reranking, and an eval set that measures retrieval quality (done)
 3. LLM layer: a gateway across local Ollama, Gemini and Groq with rate limits, retries, fallback and a circuit breaker, a semantic cache, streamed answers with citations, breaking changes pulled out of release notes as JSON, and a promptfoo eval (done)
 4. Event pipeline: Kafka (Redpanda) with Hacker News as the live stream, the outbox pattern, idempotent consumers, a dead-letter topic, BullMQ schedules and Redis locks (done)
-5. Media connector: FFmpeg and Whisper turn dev podcasts and conference talks into timestamped, searchable text, and answers link to the exact moment
+5. Media connector: FFmpeg and Whisper turn dev podcasts and conference talks into timestamped, searchable text, and answers link to the exact moment (done)
 6. APIs: GraphQL, streamed answers, a LangGraph agent and an MCP server, so coding assistants can ask about your dependencies
 7. Web dashboard (Next.js) with live updates
 8. Observability and load testing: OpenTelemetry, Langfuse, Prometheus, Grafana, k6 and Playwright
 
 ## Data
 
-Posts, release notes, advisories and Hacker News items come from public feeds and APIs. streamrag stores them for search and links back to each original. It doesn't republish them.
+Posts, release notes, advisories, Hacker News items and podcast episodes come from public feeds and APIs. streamrag stores them, and the transcripts it makes, on your machine for search, and links back to each original. It doesn't republish them.
