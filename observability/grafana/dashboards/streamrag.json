@@ -60,7 +60,7 @@
             "showPoints": "never",
             "spanNulls": true,
             "stacking": {
-              "mode": "normal",
+              "mode": "none",
               "group": "A"
             }
           }
@@ -111,7 +111,7 @@
           },
           "refId": "B",
           "expr": "histogram_quantile(0.95, sum by (le) (rate(streamrag_embed_batch_seconds_bucket[5m])))",
-          "legendFormat": "p95 batch time (s)"
+          "legendFormat": "p95 batch time"
         }
       ],
       "fieldConfig": {
@@ -124,7 +124,24 @@
             "spanNulls": true
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95 batch time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -453,7 +470,7 @@
             "showPoints": "never",
             "spanNulls": true,
             "stacking": {
-              "mode": "normal",
+              "mode": "none",
               "group": "A"
             }
           }
@@ -711,7 +728,7 @@
             "showPoints": "never",
             "spanNulls": true,
             "stacking": {
-              "mode": "normal",
+              "mode": "none",
               "group": "A"
             }
           }
