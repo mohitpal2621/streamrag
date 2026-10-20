@@ -187,6 +187,16 @@ describe('embedding and search', () => {
     assert.equal(gateway.calls, 2);
   });
 
+  test('a reply that is only a citation is not cached', async () => {
+    for (const reply of ['[1]', 'Source [1].']) {
+      const gateway = fakeGateway(reply);
+      const { done } = await askAll('which tables does vacuum keep small', gateway);
+      assert.deepEqual(done.cited, [1]);
+      await askAll('which tables does vacuum keep small', gateway);
+      assert.equal(gateway.calls, 2, reply);
+    }
+  });
+
   test('a long document shows up once, and closed documents not at all', async () => {
     const long = `postgres ${'word '.repeat(450)}`;
     await syncFeed(db, 'kb', 'notes', [doc('long', long, 'Long postgres guide'), doc('kafka', 'kafka consumer groups and partitions', 'Consumer groups')]);

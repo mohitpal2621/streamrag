@@ -13,8 +13,9 @@ export type AnswerEvent =
   | { type: 'done'; answer: string; cited: number[]; invalid: number[]; provider: string | null; cached: boolean };
 
 const SYSTEM = `You answer developer questions using only the numbered sources you are given.
-Cite every claim with its source number in square brackets, like [2]. Use only the numbers listed.
-If the sources do not answer the question, say that plainly instead of guessing. Keep it short.`;
+Answer in two to four sentences of your own words.
+After each claim, put the number of the source it comes from in square brackets, like [2]. Use only the numbers listed.
+If the sources do not answer the question, say that plainly instead of guessing.`;
 
 const NOT_FOUND = "I couldn't find anything about that in the synced sources.";
 
@@ -22,11 +23,21 @@ const NOT_FOUND = "I couldn't find anything about that in the synced sources.";
 // a wrong cache hit serves a confident answer to a different question.
 const CACHE_DISTANCE = 0.05;
 
+const CITATION = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+
 // Finds every number the answer cites, including [1, 3] and [1][3].
 function citations(answer: string) {
-  const numbers = [...answer.matchAll(/\[(\d+(?:\s*,\s*\d+)*)\]/g)].flatMap((m) => m[1].split(',').map(Number));
+  const numbers = [...answer.matchAll(CITATION)].flatMap((m) => m[1].split(',').map(Number));
   return [...new Set(numbers)].sort((a, b) => a - b);
 }
+
+// Small models sometimes reply with nothing but a citation, "[2]" or "Source [1].". That isn't an
+// answer, so it isn't cached, and the LLM eval fails it.
+export const saysSomething = (answer: string) =>
+  answer
+    .replace(CITATION, ' ')
+    .split(/\s+/)
+    .filter((word) => /\p{L}/u.test(word)).length >= 4;
 
 type AskOptions = { gateway: Gateway; embed: Embed; rerank: Rerank; k?: number };
 type Done = Extract<AnswerEvent, { type: 'done' }>;
@@ -95,7 +106,7 @@ async function* answer(db: pg.Pool, question: string, opts: AskOptions, span: Sp
   const cited = all.filter((n) => n >= 1 && n <= sources.length);
   const invalid = all.filter((n) => n < 1 || n > sources.length);
   // Only grounded answers are cached. "Not in the sources" may stop being true after the next sync.
-  if (cited.length && provider) {
+  if (cited.length && provider && saysSomething(answer)) {
     await db.query(
       `insert into answers (question, embedding, answer, sources, cited, provider)
        values ($1, $2::vector, $3, $4::jsonb, $5::int[], $6)`,

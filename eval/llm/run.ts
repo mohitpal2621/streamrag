@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
 import { connectors } from '../../src/connectors/index.ts';
 import { get } from '../../src/connectors/http.ts';
-import { ask } from '../../src/core/answer.ts';
+import { ask, saysSomething } from '../../src/core/answer.ts';
 import { embedPending } from '../../src/core/embed.ts';
 import { extractBreaking, type Breaking } from '../../src/core/extract.ts';
 import { ingest } from '../../src/core/ingest.ts';
@@ -92,6 +92,7 @@ async function answersSuite() {
                 },
               },
               { type: 'javascript', value: noneInvented },
+              { type: 'javascript', value: (answer: string) => grade(saysSomething(answer), saysSomething(answer) ? 'answers in words' : `only cites: ${answer.trim()}`) },
             ],
           })),
           ...unanswerable.map((q) => ({

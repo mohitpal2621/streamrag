@@ -288,17 +288,19 @@ Two changes the eval decided:
 
 `npm run eval:llm` uses promptfoo to score the model on the two jobs it has:
 
-- Answers: eight of the questions above, over the same advisories, plus two that no npm advisory can answer. An answer passes when it cites an advisory that answers the question and no source number it wasn't given. For the two unanswerable questions, it passes by citing nothing.
+- Answers: eight of the questions above, over the same advisories, plus two that no npm advisory can answer. An answer passes when it cites an advisory that answers the question, cites no source number it wasn't given, and says something in words besides the citations. For the two unanswerable questions, it passes by citing nothing.
 - Extraction: four changelog sections pinned at release tags. Express 5.0.0 and ESLint 9.0.0 have breaking changes the model should find; the patch releases Express 5.0.1 and 4.21.1 have none.
 
 Llama 3.2 3B, October 2026:
 
 | suite | passed | score |
 |---|---|---|
-| answers with citations | 9/10 | 0.95 |
+| answers with citations | 9/10 | 0.97 |
 | breaking changes from release notes | 4/4 | 1.00 |
 
 The one miss cited a different follow-redirects advisory than the one the question describes.
+
+The words check came late. Until it existed, the prompt ended with "Keep it short", and Llama 3.2 3B answered seven of the eight questions with nothing but a source number, like `[1]`. Six of those still passed, because the number pointed at the right advisory. With the check, that prompt scored 3 of 10. The prompt now asks for two to four sentences of the model's own words, and every answer in the run above is written out. A reply that is only a citation isn't cached either, so it can't be served again.
 
 The first extraction run passed 2 of 4. The model called a CVE fix in Express 5.0.1 breaking, and listed a single item for ESLint 9, which has 38 breaking changes, because a small model copies long lists badly. Two changes followed:
 
