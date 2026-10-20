@@ -1,12 +1,12 @@
 # streamrag
 
-A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Run as a streaming pipeline on Kafka, it makes new Hacker News comments searchable a couple of seconds after each one-minute poll finds them. It answers through a CLI, a GraphQL API that streams, an MCP server for coding assistants and a LangGraph agent that looks things up before it answers. A Next.js dashboard shows documents arriving and becoming searchable as it happens.
+A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Run as a streaming pipeline on Kafka, it makes new Hacker News comments searchable a couple of seconds after each one-minute poll finds them. It answers through a CLI, a GraphQL API that streams, an MCP server for coding assistants and a LangGraph agent that looks things up before it answers. A Next.js dashboard shows documents arriving and becoming searchable as it happens. OpenTelemetry traces, Prometheus metrics in Grafana, Langfuse for the model calls and k6 load tests show what it's doing and how much it takes.
 
 It ships with four kinds of sources: engineering blogs and release notes over RSS, Hacker News as a live stream, a dependency radar that follows the release notes and security advisories of every package in your `package.json`, and developer podcasts, transcribed locally with FFmpeg and Whisper so search can land on the minute a topic comes up.
 
 Everything runs on free, open-source tools, including the models. Answers come from a model on your own machine through Ollama, and the free tiers of Gemini and Groq can be added as fallbacks.
 
-## What works today (phases 1 to 7)
+## What works today (phases 1 to 8)
 
 - Connectors for RSS and Atom feeds, Hacker News (through its Algolia API) and OSV.dev security advisories. The default `sources.json` follows 30 engineering and release blogs plus the latest Hacker News stories and comments, about 5,600 documents on a first run.
 - Dependency radar. `npm run track -- path/to/package.json` adds each dependency's security advisories and, when the package lives on GitHub, its release notes.
@@ -22,6 +22,7 @@ Everything runs on free, open-source tools, including the models. Answers come f
 - APIs. `npm run serve` is a GraphQL API whose answers stream as server-sent events, and `npm run mcp` is an MCP server, so Claude Code, Claude Desktop or Cursor can search your sources and check upgrades and advisories while they work.
 - An agent. `npm run agent` is a LangGraph graph around native tool calling: the model calls `breaking_changes`, `security_advisories` or `search`, reads the results and answers, and each thread remembers its earlier questions.
 - A live dashboard. `web/` is a Next.js app that shows each document as its sync commits and again when it becomes searchable, with how long that took, next to the pipeline's backlog, new security alerts, each feed's next sync and the model calls. Its Ask page streams cited answers and the agent's tool calls.
+- Observability and load tests. The API and the pipeline send OpenTelemetry traces to Jaeger, and the model calls go to Langfuse as generations. Prometheus scrapes both processes and Grafana opens on a streamrag dashboard. `npm run load` runs k6 scenarios against the API.
 - Podcasts and talks. Any RSS item with an audio file is an episode. `npm run transcribe` streams it through FFmpeg into Whisper and stores a transcript with a time mark about every 30 seconds, so search results and citations link to the moment (`episode.mp3#t=1262`). In the pipeline, new episodes get transcribed as they arrive.
 
 ## Quick start
@@ -47,6 +48,8 @@ npm run pipeline                          # keep everything in sync as events; C
 npm run status                            # outbox backlog, Kafka lag, dead letters, sync jobs
 npm run serve                             # GraphQL, with GraphiQL at http://localhost:4000/graphql
 npm run mcp                               # MCP server over stdio, for coding assistants
+docker compose --profile observability up -d   # Prometheus, Grafana and Jaeger
+SCENARIO=search MODE=hybrid npm run load  # k6 against the running API
 cd web && npm install && npm run dev      # the dashboard at http://localhost:3000, while npm run serve runs
 ```
 
@@ -173,6 +176,8 @@ Llama 3.2 3B on 2 CPU cores answered "What breaks if I upgrade express from 5.0.
 
 `web/` is a Next.js app with two pages. With the API running (`npm run serve`):
 
+![The Live page](docs/dashboard.png)
+
 ```bash
 cd web
 npm install
@@ -196,6 +201,63 @@ With the pipeline running on the live corpus, a document synced by hand appeared
 
 `cd web && npm test` builds the dashboard and runs Playwright against it and the real API on a Testcontainers Postgres, with stand-in models. The tests check the first render, a sync appearing and turning searchable, a new alert, the page explaining how to start the API while it's down and reconnecting when it's back, and answers, agent follow-ups and search. With the live stream ignored on purpose, the three live tests fail.
 
+## Observability and load testing
+
+```bash
+docker compose --profile observability up -d   # Prometheus, Grafana and Jaeger, on localhost only
+# .env: OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+npm run serve
+npm run pipeline
+```
+
+![The Grafana dashboard during the load tests](docs/grafana.png)
+
+- Grafana (http://localhost:3001) opens on the streamrag dashboard: documents synced and embedded per minute, the outbox and embedding backlog, consumer lag, events by outcome, search latency by mode, GraphQL latency by operation, the semantic cache's hit rate, model latency, tokens and errors, and event loop lag and memory.
+- Prometheus (http://localhost:9090) scrapes the API at `:4000/metrics` and the pipeline at `:9465/metrics`. The counters come from prom-client and are counted in whichever process does the work. The backlog gauges are read from Postgres, Kafka and Redis when Prometheus scrapes, so the outbox keeps showing up while the pipeline is down.
+- Jaeger (http://localhost:16686) has the traces. `src/telemetry.ts` is loaded with `--import` before anything else and starts OpenTelemetry with instrumentation for HTTP, fetch, Postgres and Redis. streamrag adds spans for its own work: sync jobs and syncs, relay publishes, consumer batches, embedding, searches (with the query embedding and the rerank inside them), answers, agent runs and tool calls, and every model call.
+
+Three details that took some care:
+
+1. A change keeps its trace across processes. A sync writes its `traceparent` into each outbox event, and the relay's publish span and each consumer group's batch span link back to the syncs whose events they carry.
+2. An async generator runs in the context of whoever calls `next()`, not of whoever created it, so the spans of a streamed answer came loose from it at first. A small helper drives the generator inside the right context, which keeps an answer's search, model call and fetch in one trace.
+3. Queries, Redis commands and fetches are only traced inside an operation. Otherwise BullMQ's polling and the relay's checks would start a trace every few seconds.
+
+### Langfuse
+
+```bash
+docker compose --profile langfuse up -d        # http://localhost:3030, sign in as admin@streamrag.local / streamrag-local
+# .env:
+LANGFUSE_PUBLIC_KEY=pk-lf-streamrag-local
+LANGFUSE_SECRET_KEY=sk-lf-streamrag-local
+LANGFUSE_BASE_URL=http://localhost:3030
+```
+
+Langfuse gets the same OpenTelemetry spans, as OTLP JSON, filtered to the model work: answers, agent runs, tool calls and model calls. Model calls follow OpenTelemetry's GenAI conventions (`gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.prompt`, `gen_ai.completion`), which Langfuse shows as generations with their prompt, reply, tokens and latency. Tool calls show up as tools, and each agent thread becomes a Langfuse session. The self-hosted stack is six containers (web, worker, Postgres, ClickHouse, MinIO and Redis). Langfuse Cloud's free plan works the same way with its own keys and `LANGFUSE_BASE_URL=https://cloud.langfuse.com`.
+
+Checked against Langfuse 4.64 with a local model: an answer arrived as an `answer` span holding one generation with its prompt, reply and token counts, and an agent question about lodash 4.17.20 as an `agent` span in its thread's session, with the model call that chose `security_advisories`, the tool call, and the call that wrote the answer.
+
+### Load testing
+
+`npm run load` runs `load/k6.js` with k6 in Docker against the API (`k6 run load/k6.js` does the same with k6 installed). `SCENARIO` picks what to load: `search` with `MODE=keyword|vector|hybrid|rerank`, `dashboard` for the queries the live page polls, or `cached` for an answer the semantic cache serves. `RATE` is requests a second, held for a minute after a 10-second ramp.
+
+On a 2-core, 8 GB cloud VM, with the pipeline running and traces going to Jaeger, over about 9,900 documents in 19,900 chunks:
+
+| scenario | asked | served | median | p95 | errors |
+|---|---|---|---|---|---|
+| keyword search | 50/s | 46.5/s | 7 ms | 18 ms | 0 |
+| vector search | 20/s | 18.6/s | 20 ms | 39 ms | 0 |
+| hybrid search | 20/s | 18.6/s | 21 ms | 38 ms | 0 |
+| rerank search | 1/s | 1.0/s | 1.09 s | 1.47 s | 0 |
+| rerank search | 5/s | 4.6/s | 38 ms | 2.1 s | 0 |
+| dashboard queries | 20/s | 18.6/s | 5 ms | 12 ms | 0 |
+| cached answer | 20/s | 18.6/s | 17 ms | 34 ms | 0 |
+
+The served rate includes the 10-second ramp, which is why 20 a second shows as 18.6.
+
+Reranking is the expensive step: the cross-encoder takes about a second for 30 chunks on 2 cores. At one search a second, every search was reranked. At five a second, about one a second still was, and the other 78% (259 of 330) kept the hybrid order instead of waiting, so the median stayed at 38 ms and nothing timed out. Before the queue, two rerank searches a second piled up until 32% of them hit k6's 60-second timeout.
+
+The Playwright tests that drive the dashboard are described above.
+
 ## Eval
 
 `npm run eval` starts its own Postgres in Docker, pulls the current OSV advisories for 40 popular npm packages, embeds them, and asks 56 questions in every mode. The questions are written the way a developer would ask them, mostly without the advisory's own wording, and each lists the advisories that answer it. A few are bare CVE IDs, which keyword search is good at and embeddings are not.
@@ -205,11 +267,13 @@ Results on 557 advisories, October 2026:
 | mode | recall@1 | recall@5 | recall@10 | MRR@10 |
 |---|---|---|---|---|
 | keyword | 0.11 | 0.14 | 0.14 | 0.13 |
-| vector | 0.88 | 0.91 | 0.95 | 0.89 |
-| hybrid | 0.88 | 0.96 | 1.00 | 0.91 |
-| rerank | 0.88 | 0.98 | 1.00 | 0.92 |
+| vector | 0.88 | 0.95 | 0.95 | 0.90 |
+| hybrid | 0.89 | 1.00 | 1.00 | 0.92 |
+| rerank | 0.89 | 1.00 | 1.00 | 0.93 |
 
 Recall@k is the share of questions whose answer shows up in the top k results. MRR rewards putting it first. The corpus grows as new advisories are published, so the numbers move a little over time.
+
+The models now embed one text per call instead of padded batches of 16 (see How it's built). That changed the vectors slightly, and on the same 557 advisories it moved vector search's recall@5 from 0.91 to 0.95 and hybrid's from 0.96 to 1.00. The whole eval ran in 6.5 minutes instead of 10.
 
 Keyword search on its own needs every word of a question in one chunk, so it rarely finds an answer to a natural question. Inside hybrid search the strictness helps: it fires on exact names and IDs, which the vectors miss, and lifts recall@10 from 0.95 to 1.00.
 
@@ -256,10 +320,15 @@ src/
   upgrade.ts    finds the releases an upgrade crosses and their notes
   cli.ts
   eval.ts       the retrieval eval
+  telemetry.ts  starts OpenTelemetry; loaded with --import before anything else
+  tracing.ts    spans for streamrag's own work
+  metrics.ts    Prometheus metrics (prom-client)
 db/schema.sql
 eval/queries.json
 eval/llm/       the promptfoo eval, with its own package.json
 web/            the Next.js dashboard and its Playwright tests, with their own package.json
+observability/  Prometheus and Grafana configuration, with the streamrag dashboard
+load/k6.js      the load-test scenarios
 ```
 
 - Every source lands in one `documents` table, keyed by `(source, feed, external_id)`. Retrieval works on a `chunks` table.
@@ -267,6 +336,7 @@ web/            the Next.js dashboard and its Playwright tests, with their own p
 - `embedded_hash` records which version of a document its chunks came from, so changed documents get picked up again and nothing else does. `extracted_hash` does the same for breaking changes.
 - Vector search uses pgvector 0.8's iterative index scans, so filtering out closed documents can't leave a result list short.
 - The cache is a table too. Each row of `answers` keeps the question's embedding (HNSW-indexed), the numbered sources with their content hashes, and which of them the answer cited.
+- The two local models each run in a child process of their own, so a rerank never blocks the event loop, and they take one text per call: a batch is padded to its longest text, which on the CPU cost more than batching saved (64 chunks took 8.6 s in batches of 16 and 2.2 s one at a time).
 - Ollama, Gemini and Groq all offer an OpenAI-compatible chat API, so one small client (`fetch` plus a server-sent events parser) covers all three without an SDK.
 - Fetching is polite: one request a second, an identifying User-Agent, public endpoints only.
 - The tests run against real Postgres, Redpanda and Redis through Testcontainers, locally and in GitHub Actions, with stand-in models, a scripted gateway and faked npm and GitHub responses, so CI downloads no model and calls none. The dashboard's Playwright tests run in CI too, in Chromium.
@@ -280,7 +350,7 @@ web/            the Next.js dashboard and its Playwright tests, with their own p
 5. Media connector: FFmpeg and Whisper turn dev podcasts and conference talks into timestamped, searchable text, and answers link to the exact moment (done)
 6. APIs: GraphQL, streamed answers, a LangGraph agent and an MCP server, so coding assistants can ask about your dependencies (done)
 7. Web dashboard (Next.js) with live updates (done)
-8. Observability and load testing: OpenTelemetry, Langfuse, Prometheus, Grafana, k6 and Playwright
+8. Observability and load testing: OpenTelemetry, Langfuse, Prometheus, Grafana, k6 and Playwright (done)
 
 ## Data
 
