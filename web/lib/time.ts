@@ -15,7 +15,16 @@ export function duration(ms: number) {
   return `${Math.round(s / 86400)} d`;
 }
 
-export const ago = (iso: string, now: number) => (now - Date.parse(iso) < 5_000 ? 'now' : `${duration(now - Date.parse(iso)).replace('.0', '')} ago`);
+// 40 s, 6 min, 2 h: whole units, for relative times.
+export function roughly(ms: number) {
+  const s = Math.max(ms, 0) / 1000;
+  if (s < 60) return `${Math.round(s)} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  if (s < 86400) return `${Math.round(s / 3600)} h`;
+  return `${Math.round(s / 86400)} d`;
+}
+
+export const ago = (iso: string, now: number) => (now - Date.parse(iso) < 5_000 ? 'now' : `${roughly(now - Date.parse(iso))} ago`);
 
 export function median(values: number[]) {
   if (!values.length) return null;

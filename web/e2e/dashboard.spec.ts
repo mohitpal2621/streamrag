@@ -8,11 +8,13 @@ const control = async (path: string, body: object) => {
 test.describe('live page', () => {
   test('shows what synced, the pipeline, alerts, feeds and model usage', async ({ page }) => {
     await page.goto('/');
+    await expect(page.getByRole('heading', { name: 'Live sync' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Synced in the last 15 minutes' })).toBeVisible();
     await expect(page.getByRole('status')).toHaveText('Live');
-    await expect(page.locator('.summary')).toContainText('documents, split into');
-    await expect(page.locator('.feed li').filter({ hasText: 'Vacuum settings' })).toContainText('Searchable');
-    await expect(page.locator('.pulse .legend')).toContainText('Blogs, podcasts and releases');
+    await expect(page.locator('.finding')).toContainText("can't reach Kafka");
+    await expect(page.locator('.stages')).toContainText('searchable chunks');
+    await expect(page.locator('.feed li').filter({ hasText: 'Vacuum settings' }).locator('.state')).toHaveText('Yes');
+    await expect(page.locator('.pulse .by-source')).toContainText('Blogs, podcasts and releases');
     await expect(page.getByText("Kafka isn't reachable")).toBeVisible();
     await expect(page.locator('table').filter({ hasText: 'Feed' }).first()).toContainText('lodash advisories');
     await expect(page.locator('table').filter({ hasText: 'Feed' }).first()).toContainText('kb.example');
@@ -25,9 +27,9 @@ test.describe('live page', () => {
     await control('/sync', { title: 'a comment the test just posted' });
     const row = page.locator('.feed li').filter({ hasText: 'a comment the test just posted' });
     await expect(row).toBeVisible();
-    await expect(row.locator('.state')).toHaveText(/^Searchable after \d/);
+    await expect(row.locator('.state')).toHaveText(/^After \d/);
     await expect(row).toHaveClass(/fresh/);
-    await expect(page.locator('.summary')).toContainText('searchable a median of');
+    await expect(page.locator('.changes .card-head')).toContainText('Searchable a median of');
   });
 
   test('a new security alert shows up live', async ({ page }) => {

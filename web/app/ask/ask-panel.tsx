@@ -2,7 +2,9 @@
 
 import { useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { query, subscribe } from '../../lib/api';
-import { kindOf, KINDS } from '../../lib/sources';
+import { kindOf, KINDS, type Kind } from '../../lib/sources';
+import { count } from '../../lib/time';
+import type { Feed } from '../../lib/types';
 
 type Source = { n: number; title: string; url: string | null };
 type Hit = { title: string; url: string | null; source: string; snippet: string };
@@ -52,7 +54,16 @@ const EXAMPLES = [
 // crypto.randomUUID only exists on https and localhost pages.
 const newThread = () => (typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : Math.random().toString(36).slice(2));
 
-export function AskPanel({ api }: { api: string }) {
+const MODE_TAG = { ask: null, agent: 'Agent', search: 'Search' };
+const KIND_ROWS: Record<Kind, string> = {
+  hackernews: 'Hacker News',
+  blog: 'Blogs and podcasts',
+  release: 'Release notes',
+  advisory: 'Security advisories',
+  transcript: 'Transcripts',
+};
+
+export function AskPanel({ api, feeds }: { api: string; feeds: Feed[] | null }) {
   const [question, setQuestion] = useState('');
   const [turns, setTurns] = useState<Turn[]>([]);
   const [thread, setThread] = useState<string | null>(null);
@@ -104,71 +115,124 @@ export function AskPanel({ api }: { api: string }) {
   };
 
   return (
-    <main className="ask">
-      <h1>Ask the sources</h1>
-      <form onSubmit={submit}>
-        <input
-          aria-label="Question"
-          value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-          placeholder="Ask about anything streamrag has synced"
-          autoComplete="off"
-        />
-        <button type="submit" disabled={busy || !question.trim()}>
-          Ask
-        </button>
-        <button type="button" className="secondary" disabled={busy || !question.trim()} onClick={() => void run('agent')}>
-          Ask the agent
-        </button>
-        <button type="button" className="secondary" disabled={busy || !question.trim()} onClick={() => void run('search')}>
-          Search
-        </button>
-        {busy && (
-          <button type="button" className="quiet" onClick={() => controller.current?.abort()}>
-            Stop
-          </button>
-        )}
-      </form>
-
-      {turns.length === 0 ? (
-        <div className="turn">
-          <p className="answer muted">
-            Ask writes one answer from the six best-matching documents and cites them. The agent can also read the breaking changes between two
-            versions of an npm package and look up its security advisories, and it remembers the conversation for follow-ups.
+    <main>
+      <div className="ask-grid">
+        <div>
+          <h1>Ask the sources</h1>
+          <p className="finding">
+            Answers come from the documents streamrag has synced{feeds?.length ? ` from ${count(feeds.length)} feeds` : ''}, with links to the ones they cite.
           </p>
-          <ul className="steps">
-            {EXAMPLES.map((q) => (
-              <li key={q}>
-                <button type="button" className="quiet" onClick={() => setQuestion(q)}>
-                  {q}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : (
-        <>
-          {turns.map((t) => (
-            <TurnView key={t.id} turn={t} />
-          ))}
-          {!busy && (
-            <p className="meta">
-              {thread ? 'The agent keeps this conversation in mind. ' : ''}
-              <button
-                type="button"
-                className="quiet"
-                onClick={() => {
-                  setTurns([]);
-                  setThread(null);
-                }}
-              >
-                Start over
+          <form className="ask-form" onSubmit={submit}>
+            <input
+              aria-label="Question"
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              placeholder="Ask about anything streamrag has synced"
+              autoComplete="off"
+            />
+            <button type="submit" disabled={busy || !question.trim()}>
+              Ask
+            </button>
+            <button type="button" className="secondary" disabled={busy || !question.trim()} onClick={() => void run('agent')}>
+              Ask the agent
+            </button>
+            <button type="button" className="secondary" disabled={busy || !question.trim()} onClick={() => void run('search')}>
+              Search
+            </button>
+            {busy && (
+              <button type="button" className="text stop" onClick={() => controller.current?.abort()}>
+                Stop
               </button>
-            </p>
+            )}
+          </form>
+
+          {turns.length === 0 ? (
+            <dl className="modes">
+              <dt>Ask</dt>
+              <dd>Writes one answer from the six best-matching documents and cites them.</dd>
+              <dt>Ask the agent</dt>
+              <dd>
+                Can also read the breaking changes between two versions of an npm package and look up its security advisories. It remembers the
+                conversation, so follow-up questions work.
+              </dd>
+              <dt>Search</dt>
+              <dd>Lists the best-matching documents without writing an answer.</dd>
+            </dl>
+          ) : (
+            <>
+              {turns.map((t) => (
+                <TurnView key={t.id} turn={t} />
+              ))}
+              {!busy && (
+                <p className="after-turns">
+                  {thread ? 'The agent keeps this conversation in mind. ' : ''}
+                  <button
+                    type="button"
+                    className="text"
+                    onClick={() => {
+                      setTurns([]);
+                      setThread(null);
+                    }}
+                  >
+                    Start over
+                  </button>
+                </p>
+              )}
+            </>
           )}
-        </>
-      )}
+        </div>
+
+        <aside className="card rail">
+          <section className="examples" aria-labelledby="examples-title">
+            <h2 id="examples-title">Try asking</h2>
+            <ul>
+              {EXAMPLES.map((q) => (
+                <li key={q}>
+                  <button type="button" className="text" onClick={() => setQuestion(q)}>
+                    {q}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+          {feeds && feeds.length > 0 && <IndexPanel feeds={feeds} />}
+        </aside>
+      </div>
     </main>
+  );
+}
+
+// What there is to ask about: documents per kind of source.
+function IndexPanel({ feeds }: { feeds: Feed[] }) {
+  const byKind = new Map<Kind, { feeds: number; documents: number }>();
+  for (const f of feeds) {
+    const k = kindOf(f.source, f.feed);
+    const entry = byKind.get(k) ?? { feeds: 0, documents: 0 };
+    byKind.set(k, { feeds: entry.feeds + 1, documents: entry.documents + f.documents });
+  }
+  const rows = [...byKind].sort((a, b) => b[1].documents - a[1].documents);
+  return (
+    <section className="index" aria-labelledby="index-title">
+      <h2 id="index-title">In the index</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th className="num">Feeds</th>
+            <th className="num">Documents</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([k, v]) => (
+            <tr key={k}>
+              <td>{KIND_ROWS[k]}</td>
+              <td className="num">{count(v.feeds)}</td>
+              <td className="num">{count(v.documents)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }
 
@@ -222,7 +286,10 @@ function TurnView({ turn: t }: { turn: Turn }) {
   const waiting = !t.finished && !t.answer && !t.error;
   return (
     <article className="turn">
-      <h2>{t.question}</h2>
+      <h2>
+        {t.question}
+        {MODE_TAG[t.kind] && <span className="tag">{MODE_TAG[t.kind]}</span>}
+      </h2>
       {t.steps.length > 0 && (
         <ul className="steps">
           {t.steps.map((s, i) => (
@@ -234,7 +301,7 @@ function TurnView({ turn: t }: { turn: Turn }) {
         t.hits && <Hits hits={t.hits} />
       ) : (
         <>
-          {waiting && <p className="answer muted">{t.kind === 'agent' ? 'Working out what to look up…' : 'Reading the sources…'}</p>}
+          {waiting && <p className="answer pending">{t.kind === 'agent' ? 'Working out what to look up…' : 'Reading the sources…'}</p>}
           {t.answer && <p className="answer">{linked(t.answer, t.sources)}</p>}
           {t.done?.provider && <p className="meta">{t.done.cached ? `Cached answer, first written by ${t.done.provider}` : `Answered by ${t.done.provider}`}</p>}
           {t.sources && t.sources.length > 0 && (
@@ -260,17 +327,13 @@ function TurnView({ turn: t }: { turn: Turn }) {
 }
 
 function Hits({ hits }: { hits: Hit[] }) {
-  if (!hits.length) return <p className="muted">No matches. Try other words, or sync more sources.</p>;
+  if (!hits.length) return <p className="answer pending">No matches. Try other words, or sync more sources.</p>;
   return (
     <ul className="hits">
       {hits.map((h, i) => {
         const kind = kindOf(h.source, '');
         return (
           <li key={i}>
-            <span className={`small k-${kind}`}>
-              <span className="swatch" aria-hidden="true" />
-              {KINDS[kind]}
-            </span>{' '}
             {h.url ? (
               <a href={h.url} target="_blank" rel="noreferrer">
                 {h.title}
@@ -278,6 +341,7 @@ function Hits({ hits }: { hits: Hit[] }) {
             ) : (
               h.title
             )}
+            <span className="kind">{KINDS[kind]}</span>
             <p>{h.snippet}</p>
           </li>
         );
