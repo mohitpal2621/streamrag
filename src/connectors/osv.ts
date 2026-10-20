@@ -34,22 +34,27 @@ export function normalize(vulns: Vuln[], ecosystem: string, name: string): Doc[]
     });
 }
 
-// The feed is "<ecosystem>/<package>", e.g. npm/next or npm/@nestjs/core.
-export async function fetchFeed(feed: string) {
-  const slash = feed.indexOf('/');
-  const [ecosystem, name] = [feed.slice(0, slash), feed.slice(slash + 1)];
-  if (slash < 1 || !name) throw new Error(`osv feed must look like npm/<package>, got "${feed}"`);
+// Every advisory for a package, or with a version only those that affect that version.
+export async function advisories(ecosystem: string, name: string, version?: string) {
   const vulns: Vuln[] = [];
   let pageToken: string | undefined;
   do {
     const res = await get('https://api.osv.dev/v1/query', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ package: { ecosystem, name }, page_token: pageToken }),
+      body: JSON.stringify({ package: { ecosystem, name }, version, page_token: pageToken }),
     });
     const page = (await res.json()) as { vulns?: Vuln[]; next_page_token?: string };
     vulns.push(...(page.vulns ?? []));
     pageToken = page.next_page_token;
   } while (pageToken);
   return normalize(vulns, ecosystem, name);
+}
+
+// The feed is "<ecosystem>/<package>", e.g. npm/next or npm/@nestjs/core.
+export async function fetchFeed(feed: string) {
+  const slash = feed.indexOf('/');
+  const [ecosystem, name] = [feed.slice(0, slash), feed.slice(slash + 1)];
+  if (slash < 1 || !name) throw new Error(`osv feed must look like npm/<package>, got "${feed}"`);
+  return advisories(ecosystem, name);
 }

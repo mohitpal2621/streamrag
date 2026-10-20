@@ -1,7 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { Queue } from 'bullmq';
-import { Redis } from 'ioredis';
+import { askAgent, createAgent } from './agent/graph.ts';
 import { connectors } from './connectors/index.ts';
 import { ask } from './core/answer.ts';
 import { embedPending } from './core/embed.ts';
@@ -10,11 +9,10 @@ import { embed, rerank } from './core/models.ts';
 import { MODES, search } from './core/search.ts';
 import { connect, migrate } from './core/store.ts';
 import { clock, transcribeEpisode, untranscribed } from './media/transcribe.ts';
-import { createGateway } from './llm/gateway.ts';
-import { providersFromEnv } from './llm/providers.ts';
+import { loggedGateway } from './llm/calls.ts';
 import { deadLetters } from './pipeline/dlq.ts';
-import { brokers, createProducer, DLQ, lag, TOPIC } from './pipeline/kafka.ts';
-import { SYNC_QUEUE } from './pipeline/scheduler.ts';
+import { createProducer, TOPIC } from './pipeline/kafka.ts';
+import { pipelineStatus } from './pipeline/status.ts';
 import { mergeSources, sourcesForPackageJson } from './track.ts';
 import { breakingChanges } from './upgrade.ts';
 
@@ -23,6 +21,9 @@ const USAGE = `usage:
   npm run ingest                        sync every feed in sources.json, then embed what changed
   npm run search -- "<query>"           search everything synced
   npm run ask -- "<question>"           answer from the synced sources, with citations
+  npm run agent -- "<question>"         a tool-using agent: breaking changes, advisories and search
+  npm run serve                         the GraphQL API at http://localhost:4000/graphql
+  npm run mcp                           an MCP server over stdio, for coding assistants
   npm run upgrade -- <package> <from> [to]
                                         what breaks between two versions of an npm package (to defaults to latest)
   npm run usage                         model calls, errors, latency and tokens over the last 7 days
@@ -54,22 +55,7 @@ const limit = Number(values.limit ?? (command === 'transcribe' ? 1 : 10));
 const mode = MODES.find((m) => m === values.mode);
 
 const db = connect();
-// Every model call is logged to llm_calls; the inserts are awaited before the pool closes.
-const logged: Promise<unknown>[] = [];
-const loggedGateway = () =>
-  createGateway({
-    providers: providersFromEnv(),
-    onCall: (c) =>
-      logged.push(
-        db
-          .query(
-            `insert into llm_calls (provider, model, status, error, latency_ms, input_tokens, output_tokens)
-             values ($1, $2, $3, $4, $5, $6, $7)`,
-            [c.provider, c.model, c.status, c.error ?? null, c.latencyMs ?? null, c.inputTokens ?? null, c.outputTokens ?? null],
-          )
-          .catch((err) => console.error(`could not log a model call: ${err}`)),
-      ),
-  });
+const { gateway, flush } = loggedGateway(db);
 
 try {
   if (!Number.isInteger(limit) || limit < 1) throw new Error('--limit must be a positive whole number');
@@ -110,7 +96,7 @@ try {
     case 'ask': {
       if (!arg) throw new Error('give a question');
       let sources: { title: string; url: string | null }[] = [];
-      for await (const ev of ask(db, arg, { gateway: loggedGateway(), embed, rerank })) {
+      for await (const ev of ask(db, arg, { gateway, embed, rerank })) {
         if (ev.type === 'sources') sources = ev.sources;
         if (ev.type === 'token') process.stdout.write(ev.text);
         if (ev.type === 'done') {
@@ -120,6 +106,21 @@ try {
           if (ev.provider) console.log(ev.cached ? `\ncached answer, first written by ${ev.provider}` : `\nanswered by ${ev.provider}`);
         }
       }
+      break;
+    }
+
+    case 'agent': {
+      if (!arg) throw new Error('give a question');
+      let thinking = true;
+      for await (const ev of askAgent(createAgent({ db, embed, rerank, gateway }), arg)) {
+        if (ev.type === 'tool') console.log(`→ ${ev.name} ${ev.arguments}`);
+        else {
+          if (thinking) console.log('');
+          thinking = false;
+          process.stdout.write(ev.text);
+        }
+      }
+      console.log('');
       break;
     }
 
@@ -144,7 +145,7 @@ try {
       const [from, to] = rest;
       if (!arg || !from) throw new Error('give a package and the version you are on, e.g. npm run upgrade -- next 14.2.0 15.1.0');
       let read = false;
-      const result = await breakingChanges(db, loggedGateway(), arg, from, to, (title) => {
+      const result = await breakingChanges(db, gateway, arg, from, to, (title) => {
         read = true;
         console.log(`reading the notes for ${title}…`);
       });
@@ -193,35 +194,22 @@ try {
     }
 
     case 'status': {
-      const { rows } = await db.query<{ outbox: number; oldest: number | null; pending: number; alerts: number }>(
-        `select (select count(*)::int from outbox where published_at is null) as outbox,
-                (select extract(epoch from now() - min(created_at))::int from outbox where published_at is null) as oldest,
-                (select count(*)::int from documents where closed_at is null and embedded_hash is distinct from content_hash) as pending,
-                (select count(*)::int from alerts where created_at > now() - interval '7 days') as alerts`,
+      const s = await pipelineStatus(db);
+      console.log(`outbox      ${s.outbox} events waiting for the relay${s.oldestOutboxSeconds ? `, oldest ${s.oldestOutboxSeconds}s` : ''}`);
+      console.log(`embeddings  ${s.pendingEmbeddings} documents waiting`);
+      const k = s.kafka;
+      console.log(
+        'unreachable' in k
+          ? `kafka       not reachable at ${k.unreachable}`
+          : `kafka       behind by ${k.embedder} (embedder), ${k.alerts} (alerts), ${k.transcriber} (transcriber); ${k.deadLetters} dead letters not replayed`,
       );
-      const s = rows[0];
-      console.log(`outbox      ${s.outbox} events waiting for the relay${s.oldest ? `, oldest ${s.oldest}s` : ''}`);
-      console.log(`embeddings  ${s.pending} documents waiting`);
-      try {
-        const [embedderLag, alertsLag, dead] = await Promise.all([lag('streamrag-embedder', TOPIC), lag('streamrag-alerts', TOPIC), lag('streamrag-dlq-replay', DLQ)]);
-        console.log(`kafka       embedder behind by ${embedderLag}, alerts behind by ${alertsLag}, ${dead} dead letters not replayed`);
-      } catch (err) {
-        console.log(`kafka       not reachable at ${brokers().join(', ')} (${err instanceof Error ? err.message : err})`);
-      }
-      const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', { maxRetriesPerRequest: 1, connectTimeout: 3_000, lazyConnect: true });
-      redis.on('error', () => {}); // connect() rejects with the same error below; this stops ioredis printing it as well
-      try {
-        await redis.connect();
-        const queue = new Queue(SYNC_QUEUE, { connection: redis });
-        const [counts, scheduled] = await Promise.all([queue.getJobCounts('waiting', 'active', 'delayed', 'failed'), queue.getJobSchedulersCount()]);
-        console.log(`syncs       ${scheduled} sources scheduled; ${counts.waiting} waiting, ${counts.active} running, ${counts.delayed} delayed, ${counts.failed} failed`);
-        await queue.close();
-      } catch (err) {
-        console.log(`syncs       Redis not reachable (${err instanceof Error ? err.message : err})`);
-      } finally {
-        redis.disconnect();
-      }
-      console.log(`alerts      ${s.alerts} new advisories in the last 7 days`);
+      const q = s.syncs;
+      console.log(
+        'unreachable' in q
+          ? `syncs       Redis not reachable (${q.unreachable})`
+          : `syncs       ${q.scheduled} sources scheduled; ${q.waiting} waiting, ${q.active} running, ${q.delayed} delayed, ${q.failed} failed`,
+      );
+      console.log(`alerts      ${s.alertsThisWeek} new advisories in the last 7 days`);
       break;
     }
 
@@ -255,6 +243,6 @@ try {
   console.error(String(err));
   process.exitCode = 1;
 } finally {
-  await Promise.all(logged);
+  await flush();
   await db.end();
 }

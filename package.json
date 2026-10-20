@@ -12,6 +12,9 @@
     "ingest": "node --env-file-if-exists=.env src/cli.ts ingest",
     "search": "node --env-file-if-exists=.env src/cli.ts search",
     "ask": "node --env-file-if-exists=.env src/cli.ts ask",
+    "agent": "node --env-file-if-exists=.env src/cli.ts agent",
+    "serve": "node --env-file-if-exists=.env src/serve.ts",
+    "mcp": "node --env-file-if-exists=.env src/mcp.ts",
     "upgrade": "node --env-file-if-exists=.env src/cli.ts upgrade",
     "usage": "node --env-file-if-exists=.env src/cli.ts usage",
     "track": "node --env-file-if-exists=.env src/cli.ts track",
@@ -27,11 +30,17 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "@langchain/core": "^1.2.18",
+    "@langchain/langgraph": "^1.5.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@platformatic/kafka": "^2.14.0",
     "bullmq": "^6.3.17",
     "fast-xml-parser": "^5.11.2",
+    "graphql": "^17.0.2",
+    "graphql-yoga": "^5.24.6",
     "ioredis": "^6.0.0",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^12.2.1",

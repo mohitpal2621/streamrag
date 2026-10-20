@@ -72,7 +72,7 @@ export async function breakingChanges(db: pg.Pool, gateway: Gateway, name: strin
   const info = (await res.json()) as { versions: Record<string, unknown>; 'dist-tags': { latest: string } };
   const repo = githubRepo(((await (await get(`${npm}/latest`)).json()) as { repository?: string | { url?: string } }).repository);
   if (!repo) throw new Error(`${name} lists no GitHub repository on npm, so there are no release notes to read`);
-  const target = to ?? info['dist-tags'].latest;
+  const target = to && to !== 'latest' ? to : info['dist-tags'].latest;
   const versions = releasesToCheck(Object.keys(info.versions), from, target);
 
   // The releases feed has the newest ten for one request; anything older comes from the API by tag.
