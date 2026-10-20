@@ -1,5 +1,7 @@
 import type { Producer } from '@platformatic/kafka';
 import type pg from 'pg';
+import { eventsPublished } from '../metrics.ts';
+import { linksTo, traced, tracer } from '../tracing.ts';
 import { TOPIC } from './kafka.ts';
 
 // Publishes outbox rows to Kafka in id order and marks them published once Kafka has acknowledged
@@ -11,13 +13,17 @@ export async function drainOutbox(db: pg.Pool, producer: Producer<string, string
     const client = await db.connect();
     try {
       await client.query('begin');
-      const { rows } = await client.query<{ id: string; key: string; payload: object }>(
+      const { rows } = await client.query<{ id: string; key: string; payload: { traceparent?: string } }>(
         'select id, key, payload from outbox where published_at is null order by id limit $1 for update skip locked',
         [batch],
       );
       if (rows.length) {
-        await producer.send({ messages: rows.map((r) => ({ topic: TOPIC, key: r.key, value: JSON.stringify({ ...r.payload, id: r.id }) })) });
-        await client.query('update outbox set published_at = now() where id = any($1::bigint[])', [rows.map((r) => r.id)]);
+        const links = linksTo(rows.map((r) => r.payload.traceparent));
+        await traced(tracer, 'relay publish', { 'messaging.destination.name': TOPIC, 'messaging.batch.message_count': rows.length }, async () => {
+          await producer.send({ messages: rows.map((r) => ({ topic: TOPIC, key: r.key, value: JSON.stringify({ ...r.payload, id: r.id }) })) });
+          await client.query('update outbox set published_at = now() where id = any($1::bigint[])', [rows.map((r) => r.id)]);
+        }, links);
+        eventsPublished.inc(rows.length);
       }
       await client.query('commit');
       sent += rows.length;

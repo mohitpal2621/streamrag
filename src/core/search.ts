@@ -1,4 +1,7 @@
 import type pg from 'pg';
+import { trace } from '@opentelemetry/api';
+import { rerankSkipped, searchSeconds } from '../metrics.ts';
+import { traced, tracer } from '../tracing.ts';
 import type { Embed, Rerank } from './models.ts';
 
 export const MODES = ['keyword', 'vector', 'hybrid', 'rerank'] as const;
@@ -8,6 +11,26 @@ export type Hit = { documentId: string; title: string; source: string; url: stri
 
 const CANDIDATES = 50; // per leg, and the pool the final results come from
 const RERANK_POOL = 30; // the cross-encoder is slow, so it only sees the best fused chunks
+
+// The cross-encoder takes one to two seconds for 30 chunks on 2 cores and keeps every core busy, so
+// reranks run one at a time, and a search that would wait behind more than RERANK_QUEUE others keeps
+// the hybrid order instead. Without this, at 2 rerank searches a second, the queue grew until
+// requests timed out; with it, the slowest stay under a few seconds and the rest take milliseconds.
+const RERANK_QUEUE = 1;
+let reranking: Promise<unknown> = Promise.resolve();
+let queued = 0;
+
+async function rerankInTurn(rerank: Rerank, query: string, texts: string[]) {
+  if (queued >= RERANK_QUEUE + 1) return null;
+  queued++;
+  const turn = reranking.then(() => traced(tracer, 'rerank', { 'rerank.candidates': texts.length }, () => rerank(query, texts)));
+  reranking = turn.catch(() => {});
+  try {
+    return await turn;
+  } finally {
+    queued--;
+  }
+}
 
 // Keyword and vector search each rank their best chunks, then reciprocal rank fusion adds
 // 1 / (60 + rank) from each list. A chunk both legs like wins, and raw scores from the two legs,
@@ -39,10 +62,21 @@ const FUSED = `
   from fused f join chunks c on c.id = f.id join documents d on d.id = c.document_id
   order by f.score desc limit ${CANDIDATES}`;
 
-export async function search(db: pg.Pool, query: string, opts: { mode: Mode; limit: number; embed: Embed; rerank: Rerank }) {
+type SearchOptions = { mode: Mode; limit: number; embed: Embed; rerank: Rerank };
+
+export function search(db: pg.Pool, query: string, opts: SearchOptions) {
+  const done = searchSeconds.startTimer({ mode: opts.mode });
+  return traced(tracer, 'search', { 'search.query': query, 'search.mode': opts.mode, 'search.limit': opts.limit }, async (span) => {
+    const hits = await find(db, query, opts);
+    span.setAttribute('search.hits', hits.length);
+    return hits;
+  }).finally(done);
+}
+
+async function find(db: pg.Pool, query: string, opts: SearchOptions) {
   const useKeyword = opts.mode !== 'vector';
   const useVector = opts.mode !== 'keyword';
-  const vector = useVector ? `[${(await opts.embed([query], 'query'))[0].join(',')}]` : null;
+  const vector = useVector ? `[${(await traced(tracer, 'embed query', {}, () => opts.embed([query], 'query')))[0].join(',')}]` : null;
 
   const client = await db.connect();
   let chunks: Hit[];
@@ -64,8 +98,10 @@ export async function search(db: pg.Pool, query: string, opts: { mode: Mode; lim
   const isIdentifier = /^\S*\d\S*$/.test(query.trim());
   if (opts.mode === 'rerank' && chunks.length && !isIdentifier) {
     const pool = chunks.slice(0, RERANK_POOL);
-    const scores = await opts.rerank(query, pool.map((c) => c.text));
-    chunks = pool.map((c, i) => ({ ...c, score: scores[i] })).sort((a, b) => b.score - a.score);
+    const scores = await rerankInTurn(opts.rerank, query, pool.map((c) => c.text));
+    if (scores) chunks = pool.map((c, i) => ({ ...c, score: scores[i] })).sort((a, b) => b.score - a.score);
+    else rerankSkipped.inc();
+    trace.getActiveSpan()?.setAttribute('search.reranked', scores !== null);
   }
 
   // Results are documents: each shows up once, with its best chunk.

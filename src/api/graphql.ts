@@ -1,10 +1,12 @@
-import { createSchema, createYoga } from 'graphql-yoga';
+import { Kind, type DocumentNode } from 'graphql';
+import { createSchema, createYoga, type Plugin } from 'graphql-yoga';
 import { askAgent, createAgent, type AgentEvent } from '../agent/graph.ts';
 import type { Deps } from '../agent/tools.ts';
 import { ask, type AnswerEvent } from '../core/answer.ts';
 import { search, type Mode } from '../core/search.ts';
 import { usage } from '../llm/calls.ts';
-import { feeds, pipelineStatus } from '../pipeline/status.ts';
+import { graphqlSeconds } from '../metrics.ts';
+import { feeds, sharedStatus } from '../pipeline/status.ts';
 import { breakingChanges } from '../upgrade.ts';
 import { documentActivity, listAlerts, pulse, type Activity, type Live } from './live.ts';
 
@@ -198,6 +200,25 @@ const typeDefs = /* GraphQL */ `
   }
 `;
 
+// Operations are named after their first field (search, status, ask) unless the client names them.
+function operation(document: DocumentNode, name?: string | null) {
+  if (name) return name;
+  const op = document.definitions.find((d) => d.kind === Kind.OPERATION_DEFINITION);
+  const field = op?.selectionSet.selections.find((s) => s.kind === Kind.FIELD);
+  return field?.name.value ?? 'unknown';
+}
+
+const timed: Plugin = {
+  onExecute: ({ args }) => {
+    const done = graphqlSeconds.startTimer({ operation: operation(args.document, args.operationName), type: 'query' });
+    return { onExecuteDone: () => void done() };
+  },
+  onSubscribe: ({ args }) => {
+    const done = graphqlSeconds.startTimer({ operation: operation(args.document, args.operationName), type: 'subscription' });
+    return { onSubscribeResult: () => ({ onEnd: () => void done() }) };
+  },
+};
+
 // A chunk's text after its title line, cut at a word boundary near 280 characters.
 const snippet = (text: string) => {
   const body = text.slice(text.indexOf('\n') + 1).replace(/\s+/g, ' ').trim();
@@ -205,6 +226,7 @@ const snippet = (text: string) => {
   const end = body.lastIndexOf(' ', 280);
   return `${body.slice(0, end > 200 ? end : 280).replace(/[\s,;:.-]+$/, '')}…`;
 };
+
 const clamp = (n: number, max: number) => Math.min(Math.max(Math.trunc(n), 1), max);
 
 // GraphQL over HTTP, with GraphiQL at /graphql. Subscriptions stream over server-sent events, which
@@ -212,10 +234,12 @@ const clamp = (n: number, max: number) => Math.min(Math.max(Math.trunc(n), 1), m
 // Yoga allows any origin by default, which lets the dashboard on another port call it.
 export function createApi(deps: Deps, live: Live) {
   const agent = createAgent(deps);
+  const pipelineStatus = sharedStatus(deps.db);
   const passThrough = <T>(event: T) => event;
   return createYoga({
     graphqlEndpoint: '/graphql',
     graphiql: { title: 'streamrag' },
+    plugins: [timed],
     schema: createSchema({
       typeDefs,
       resolvers: {
@@ -232,7 +256,7 @@ export function createApi(deps: Deps, live: Live) {
           }),
           alerts: (_: unknown, a: { limit: number }) => listAlerts(deps.db, { limit: clamp(a.limit, 500) }),
           status: async () => {
-            const { kafka, syncs, ...s } = await pipelineStatus(deps.db);
+            const { kafka, syncs, ...s } = await pipelineStatus();
             const k = 'unreachable' in kafka ? null : kafka;
             return {
               ...s,

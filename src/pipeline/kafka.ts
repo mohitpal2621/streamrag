@@ -14,6 +14,7 @@ export type DocumentEvent = {
   feed: string;
   inserted: boolean; // false when an existing document changed
   initial: boolean; // from the first sync of its feed
+  traceparent?: string; // the sync that made it, when tracing is on
 };
 
 // Three partitions let up to three members of a consumer group share the work.

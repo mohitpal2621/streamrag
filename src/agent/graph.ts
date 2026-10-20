@@ -1,6 +1,7 @@
 import { Annotation, END, MemorySaver, START, StateGraph, type LangGraphRunnableConfig } from '@langchain/langgraph';
 import { z } from 'zod';
 import type { Message, ToolCall } from '../llm/openai.ts';
+import { llmTracer, traced, tracedStream } from '../tracing.ts';
 import { tools, type Deps } from './tools.ts';
 
 const SYSTEM = `You help developers with their dependencies and their stack. Look things up with the tools before answering: breaking_changes for upgrades, security_advisories for known vulnerabilities, search for anything else. Once a tool has returned, answer the question from its result: say what it found, include the links it gave, and say plainly when it doesn't cover the question.`;
@@ -45,15 +46,20 @@ export function createAgent(deps: Deps, { maxRounds = 3 } = {}) {
     const results = await Promise.all(
       calls.map(async (call): Promise<Message> => {
         config.writer?.({ type: 'tool', name: call.function.name, arguments: call.function.arguments } satisfies AgentEvent);
-        let content: string;
-        try {
-          const def = defs[call.function.name as keyof typeof defs];
-          if (!def) throw new Error(`there is no tool called ${call.function.name}`);
-          const args = z.object(def.input).parse(JSON.parse(call.function.arguments || '{}'));
-          content = await (def.run as (a: unknown) => Promise<string>)(args);
-        } catch (err) {
-          content = `error: ${err instanceof z.ZodError ? z.prettifyError(err) : err instanceof Error ? err.message : err}`;
-        }
+        const attributes = { 'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.name': call.function.name, 'gen_ai.tool.call.arguments': call.function.arguments };
+        const content = await traced(llmTracer, `tool ${call.function.name}`, attributes, async (span) => {
+          let result: string;
+          try {
+            const def = defs[call.function.name as keyof typeof defs];
+            if (!def) throw new Error(`there is no tool called ${call.function.name}`);
+            const args = z.object(def.input).parse(JSON.parse(call.function.arguments || '{}'));
+            result = await (def.run as (a: unknown) => Promise<string>)(args);
+          } catch (err) {
+            result = `error: ${err instanceof z.ZodError ? z.prettifyError(err) : err instanceof Error ? err.message : err}`;
+          }
+          span.setAttribute('gen_ai.tool.call.result', result);
+          return result;
+        });
         return { role: 'tool', tool_call_id: call.id, content };
       }),
     );
@@ -76,10 +82,17 @@ export type Agent = ReturnType<typeof createAgent>;
 
 // Asks the agent one question in a thread and yields what happens: each tool call, then the answer's
 // tokens as they are written.
-export async function* askAgent(agent: Agent, question: string, thread: string = crypto.randomUUID()): AsyncGenerator<AgentEvent> {
-  const stream = await agent.stream(
-    { messages: [{ role: 'user', content: question }] },
-    { configurable: { thread_id: thread }, streamMode: 'custom', recursionLimit: 12 },
-  );
-  for await (const event of stream) yield event as AgentEvent;
+export function askAgent(agent: Agent, question: string, thread: string = crypto.randomUUID()): AsyncGenerator<AgentEvent> {
+  return tracedStream(llmTracer, 'agent', { 'input.value': question, 'session.id': thread }, async function* (span) {
+    const stream = await agent.stream(
+      { messages: [{ role: 'user', content: question }] },
+      { configurable: { thread_id: thread }, streamMode: 'custom', recursionLimit: 12 },
+    );
+    let answer = '';
+    for await (const event of stream as AsyncIterable<AgentEvent>) {
+      if (event.type === 'token') answer += event.text;
+      yield event;
+    }
+    span.setAttribute('output.value', answer);
+  });
 }

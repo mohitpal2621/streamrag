@@ -1,3 +1,5 @@
+import { context, SpanStatusCode, trace } from '@opentelemetry/api';
+import { inContext, llmTracer } from '../tracing.ts';
 import { HttpError, streamChat, type ChatEvent, type ChatOptions, type Message, type Provider, type ToolCall } from './openai.ts';
 
 export type CallLog = {
@@ -83,19 +85,28 @@ export function createGateway(o: Options) {
         const started = now();
         let emitted = false;
         let usage = { inputTokens: 0, outputTokens: 0 };
+        let reply = '';
+        // One span per attempt, in OpenTelemetry's GenAI conventions, which is what Langfuse reads.
+        const span = llmTracer.startSpan(`chat ${p.model}`, {
+          attributes: { 'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': p.name, 'gen_ai.request.model': p.model, 'gen_ai.prompt': JSON.stringify(messages) },
+        });
         try {
-          for await (const ev of connect(p, messages, options)) {
+          for await (const ev of inContext(trace.setSpan(context.active(), span), connect(p, messages, options))) {
             if (ev.type === 'usage') {
               usage = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
             } else {
               emitted = true;
+              reply += ev.type === 'token' ? ev.text : JSON.stringify(ev.calls);
               yield ev.type === 'token' ? { provider: p.name, text: ev.text } : { provider: p.name, text: '', calls: ev.calls };
             }
           }
           slot.failures = 0;
+          span.setAttributes({ 'gen_ai.completion': reply, 'gen_ai.usage.input_tokens': usage.inputTokens, 'gen_ai.usage.output_tokens': usage.outputTokens });
           o.onCall?.({ provider: p.name, model: p.model, status: 'ok', latencyMs: now() - started, ...usage });
           return;
         } catch (err) {
+          span.recordException(err instanceof Error ? err : String(err));
+          span.setStatus({ code: SpanStatusCode.ERROR, message: describe(err) });
           o.onCall?.({ provider: p.name, model: p.model, status: 'error', error: describe(err), latencyMs: now() - started });
           if (emitted) throw err;
           const retryAfterMs = err instanceof HttpError ? err.retryAfterMs : null;
@@ -110,6 +121,8 @@ export function createGateway(o: Options) {
           if (slot.failures >= BREAKER_FAILURES) slot.openUntil = now() + BREAKER_COOLDOWN;
           reasons.push(`${p.name}: ${describe(err)}`);
           break;
+        } finally {
+          span.end();
         }
       }
     }

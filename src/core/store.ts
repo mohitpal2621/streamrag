@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
+import { documentsSynced } from '../metrics.ts';
+import { traced, traceparent, tracer } from '../tracing.ts';
 
 export type Doc = {
   externalId: string;
@@ -34,7 +36,18 @@ const contentHash = (d: Doc) =>
 // listing is gone. Append-only feeds (RSS, Hacker News) just roll old items off; those stay open.
 // Expects one sync per feed at a time. The pipeline's sync worker holds a Redis lock per feed for
 // that; npm run ingest assumes the pipeline isn't running alongside it.
-export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: Doc[], closeMissing = true) {
+export function syncFeed(db: pg.Pool, source: string, feed: string, docs: Doc[], closeMissing = true) {
+  return traced(tracer, 'sync', { 'sync.source': source, 'sync.feed': feed, 'sync.listed': docs.length }, async (span) => {
+    const r = await sync(db, source, feed, docs, closeMissing);
+    span.setAttributes({ 'sync.inserted': r.inserted, 'sync.updated': r.updated, 'sync.closed': r.closed });
+    documentsSynced.inc({ source, change: 'added' }, r.inserted);
+    documentsSynced.inc({ source, change: 'changed' }, r.updated);
+    documentsSynced.inc({ source, change: 'closed' }, r.closed);
+    return r;
+  });
+}
+
+async function sync(db: pg.Pool, source: string, feed: string, docs: Doc[], closeMissing: boolean) {
   const rows = [...new Map(docs.map((d) => [d.externalId, d])).values()]; // one upsert can't touch a row twice
   const client = await db.connect();
   try {
@@ -74,7 +87,7 @@ export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: 
     const events = [
       ...upserted.rows.filter((r) => r.changed).map((r) => ({ type: 'document.changed', documentId: r.id, contentHash: r.content_hash, inserted: r.inserted })),
       ...(closed?.rows ?? []).map((r) => ({ type: 'document.closed', documentId: r.id, contentHash: r.content_hash, inserted: false })),
-    ].map((e) => ({ ...e, source, feed, initial }));
+    ].map((e) => ({ ...e, source, feed, initial, traceparent: traceparent() })); // so consumers can link back to this sync
     if (events.length) {
       const { rows: ids } = await client.query<{ id: string }>(
         'insert into outbox (key, payload) select * from unnest($1::text[], $2::jsonb[]) returning id',

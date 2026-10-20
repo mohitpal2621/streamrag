@@ -1,5 +1,8 @@
+import type { Span } from '@opentelemetry/api';
 import type pg from 'pg';
 import type { Gateway } from '../llm/gateway.ts';
+import { answers } from '../metrics.ts';
+import { llmTracer, tracedStream } from '../tracing.ts';
 import type { Embed, Rerank } from './models.ts';
 import { search } from './search.ts';
 
@@ -25,11 +28,19 @@ function citations(answer: string) {
   return [...new Set(numbers)].sort((a, b) => a - b);
 }
 
-export async function* ask(
-  db: pg.Pool,
-  question: string,
-  opts: { gateway: Gateway; embed: Embed; rerank: Rerank; k?: number },
-): AsyncGenerator<AnswerEvent> {
+type AskOptions = { gateway: Gateway; embed: Embed; rerank: Rerank; k?: number };
+type Done = Extract<AnswerEvent, { type: 'done' }>;
+
+export const ask = (db: pg.Pool, question: string, opts: AskOptions): AsyncGenerator<AnswerEvent> =>
+  tracedStream(llmTracer, 'answer', { 'input.value': question }, (span) => answer(db, question, opts, span));
+
+function finish(span: Span, done: Done) {
+  span.setAttributes({ 'output.value': done.answer, 'answer.cached': done.cached, 'answer.cited': done.cited.length });
+  answers.inc({ cached: String(done.cached) });
+  return done;
+}
+
+async function* answer(db: pg.Pool, question: string, opts: AskOptions, span: Span): AsyncGenerator<AnswerEvent> {
   const [vector] = await opts.embed([question], 'query');
   const literal = `[${vector.join(',')}]`;
 
@@ -49,7 +60,7 @@ export async function* ask(
   if (cached[0]) {
     yield { type: 'sources', sources: cached[0].sources };
     yield { type: 'token', text: cached[0].answer };
-    yield { type: 'done', answer: cached[0].answer, cited: cached[0].cited, invalid: [], provider: cached[0].provider, cached: true };
+    yield finish(span, { type: 'done', answer: cached[0].answer, cited: cached[0].cited, invalid: [], provider: cached[0].provider, cached: true });
     return;
   }
 
@@ -57,7 +68,7 @@ export async function* ask(
   const hits = await search(db, question, { mode: 'rerank', limit: opts.k ?? 6, embed: embedOnce, rerank: opts.rerank });
   if (!hits.length) {
     yield { type: 'token', text: NOT_FOUND };
-    yield { type: 'done', answer: NOT_FOUND, cited: [], invalid: [], provider: null, cached: false };
+    yield finish(span, { type: 'done', answer: NOT_FOUND, cited: [], invalid: [], provider: null, cached: false });
     return;
   }
 
@@ -91,5 +102,5 @@ export async function* ask(
       [question, literal, answer, JSON.stringify(sources), cited, provider],
     );
   }
-  yield { type: 'done', answer, cited, invalid, provider, cached: false };
+  yield finish(span, { type: 'done', answer, cited, invalid, provider, cached: false });
 }

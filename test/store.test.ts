@@ -117,6 +117,23 @@ describe('embedding and search', () => {
     assert.deepEqual(await find('database tuning', 'rerank'), ['Vacuum settings', 'Tuning checklist', 'Consumer groups']);
   });
 
+  test('reranks run one at a time, and a search that would queue behind two keeps the hybrid order', async () => {
+    let running = 0;
+    let most = 0;
+    const slowRerank: Rerank = async (query, texts) => {
+      most = Math.max(most, ++running);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      running--;
+      return fakeRerank(query, texts);
+    };
+    const results = await Promise.all(
+      [1, 2, 3].map(async () => (await search(db, 'database tuning', { mode: 'rerank', limit: 10, embed: fakeEmbed, rerank: slowRerank })).map((h) => h.title)),
+    );
+    assert.equal(most, 1);
+    assert.deepEqual(results.slice(0, 2), Array(2).fill(['Vacuum settings', 'Tuning checklist', 'Consumer groups']));
+    assert.deepEqual(results[2], ['Tuning checklist', 'Vacuum settings', 'Consumer groups']); // the hybrid order
+  });
+
   test('a bare identifier keeps the hybrid order instead of the reranker’s', async () => {
     await syncFeed(db, 'kb', 'advisories', [doc('cve', 'fixes CVE-2025-1234 in the parser', 'Advisory')]);
     await embedPending(db, fakeEmbed);

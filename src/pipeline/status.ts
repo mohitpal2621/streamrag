@@ -1,6 +1,7 @@
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import type pg from 'pg';
+import client from 'prom-client';
 import { brokers, DLQ, lag, TOPIC } from './kafka.ts';
 import { SYNC_QUEUE } from './scheduler.ts';
 
@@ -79,5 +80,43 @@ export async function feeds(db: pg.Pool) {
   return rows.map((r) => {
     const at = next instanceof Map ? next.get(`${r.source} ${r.feed}`) : undefined;
     return { source: r.source, feed: r.feed, documents: r.documents, syncedAt: r.synced_at.toISOString(), nextSyncAt: at ? new Date(at).toISOString() : null };
+  });
+}
+
+type Status = Awaited<ReturnType<typeof pipelineStatus>>;
+
+// The status, read once and shared for a couple of seconds. Each read opens connections to Kafka and
+// Redis, which the dashboard's polling and Prometheus's scrapes shouldn't multiply.
+export function sharedStatus(db: pg.Pool, ttlMs = 2_000) {
+  let pending: Promise<Status> | null = null;
+  return () => (pending ??= pipelineStatus(db).finally(() => setTimeout(() => (pending = null), ttlMs).unref()));
+}
+
+// The pipeline's backlog as Prometheus gauges, read when Prometheus scrapes, so they stay current
+// while the pipeline is down. The API serves them.
+export function statusGauges(db: pg.Pool) {
+  const status = sharedStatus(db);
+  const gauge = (name: string, help: string, labelNames: string[], read: (s: Status, g: client.Gauge) => void) =>
+    new client.Gauge({
+      name,
+      help,
+      labelNames,
+      async collect() {
+        this.reset();
+        const s = await status().catch(() => null); // with the database down, leave it empty rather than fail the scrape
+        if (s) read(s, this);
+      },
+    });
+  gauge('streamrag_documents', 'Open documents', [], (s, g) => g.set(s.documents));
+  gauge('streamrag_outbox_events', 'Outbox events not yet published to Kafka', [], (s, g) => g.set(s.outbox));
+  gauge('streamrag_pending_embeddings', 'Open documents whose current version has no chunks yet', [], (s, g) => g.set(s.pendingEmbeddings));
+  gauge('streamrag_up', 'Whether Kafka and Redis answer (1) or not (0)', ['service'], (s, g) => {
+    g.set({ service: 'kafka' }, 'unreachable' in s.kafka ? 0 : 1);
+    g.set({ service: 'redis' }, 'unreachable' in s.syncs ? 0 : 1);
+  });
+  gauge('streamrag_consumer_lag', 'Events a consumer group or the dead-letter topic has not handled yet', ['group'], (s, g) => {
+    if ('unreachable' in s.kafka) return;
+    const { embedder, alerts, transcriber, deadLetters } = s.kafka;
+    for (const [group, behind] of Object.entries({ embedder, alerts, transcriber, dlq: deadLetters })) g.set({ group }, behind);
   });
 }

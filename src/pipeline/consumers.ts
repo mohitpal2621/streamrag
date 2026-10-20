@@ -11,6 +11,8 @@ import type pg from 'pg';
 import { embedDocs, pendingDocs } from '../core/embed.ts';
 import type { Embed } from '../core/models.ts';
 import { notifyIds } from '../core/store.ts';
+import { eventsHandled } from '../metrics.ts';
+import { linksTo, traced, tracer } from '../tracing.ts';
 import { clock, transcribeEpisode, untranscribed, type Recognize } from '../media/transcribe.ts';
 import { brokers, DLQ, TOPIC, type DocumentEvent } from './kafka.ts';
 
@@ -38,6 +40,9 @@ export async function startConsumer(
   });
   const stream = await consumer.consume({ topics: [TOPIC], mode: MessagesStreamModes.COMMITTED, fallbackMode: MessagesStreamFallbackModes.EARLIEST });
   const parse = (m: Message<string, string, string, string>) => JSON.parse(m.value) as DocumentEvent;
+  // A span per batch, linked to the syncs whose events it handles.
+  const run = (events: DocumentEvent[]) =>
+    traced(tracer, `${name} handle`, { 'messaging.consumer.group.name': `streamrag-${name}`, 'messaging.batch.message_count': events.length }, () => handle(events), linksTo(events.map((e) => e.traceparent)));
 
   const done = (async () => {
     for await (const first of stream) {
@@ -49,8 +54,9 @@ export async function startConsumer(
       }
       if (messages.length > 1) {
         try {
-          await handle(messages.map(parse));
+          await run(messages.map(parse));
           for (const m of messages) await m.commit();
+          eventsHandled.inc({ consumer: name, outcome: 'ok' }, messages.length);
           continue;
         } catch {
           // redone one at a time below, which leaves the bad event alone in the dead-letter topic
@@ -59,13 +65,16 @@ export async function startConsumer(
       for (const message of messages) {
         for (let attempt = 1; ; attempt++) {
           try {
-            await handle([parse(message)]);
+            await run([parse(message)]);
+            eventsHandled.inc({ consumer: name, outcome: 'ok' });
             break;
           } catch (err) {
             if (attempt < attempts) {
+              eventsHandled.inc({ consumer: name, outcome: 'retried' });
               await sleep(retryDelayMs * 4 ** (attempt - 1));
               continue;
             }
+            eventsHandled.inc({ consumer: name, outcome: 'dead_lettered' });
             log(`${name}: event ${message.partition}/${message.offset} failed ${attempts} times, moved to ${DLQ}: ${err}`);
             await producer.send({
               messages: [

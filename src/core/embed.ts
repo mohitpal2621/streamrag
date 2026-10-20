@@ -1,4 +1,6 @@
 import type pg from 'pg';
+import { documentsEmbedded, embedSeconds } from '../metrics.ts';
+import { traced, tracer } from '../tracing.ts';
 import { chunk } from './chunk.ts';
 import type { Embed } from './models.ts';
 import { notifyIds } from './store.ts';
@@ -17,7 +19,15 @@ export async function pendingDocs(db: pg.Pool, ids: string[]) {
 }
 
 // Replaces the chunks of these documents in one transaction.
-export async function embedDocs(db: pg.Pool, embed: Embed, docs: Pending[]) {
+export function embedDocs(db: pg.Pool, embed: Embed, docs: Pending[]) {
+  const done = embedSeconds.startTimer();
+  return traced(tracer, 'embed', { 'embed.documents': docs.length }, async (span) => {
+    span.setAttribute('embed.chunks', await store(db, embed, docs));
+    documentsEmbedded.inc(docs.length);
+  }).finally(done);
+}
+
+async function store(db: pg.Pool, embed: Embed, docs: Pending[]) {
   const pieces = docs.flatMap((d) => chunk(d.title, d.body).map((text, ord) => ({ documentId: d.id, ord, text })));
   const vectors = await embed(pieces.map((p) => p.text), 'passage');
 
@@ -39,6 +49,7 @@ export async function embedDocs(db: pg.Pool, embed: Embed, docs: Pending[]) {
     );
     await notifyIds(client, 'embedded', docs.map((d) => d.id)); // the dashboard marks them searchable
     await client.query('commit');
+    return pieces.length;
   } catch (err) {
     await client.query('rollback');
     throw err;
