@@ -1,12 +1,12 @@
 # streamrag
 
-A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Later phases add an event pipeline and agents on top.
+A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Run as a streaming pipeline on Kafka, it makes new Hacker News comments searchable a couple of seconds after each one-minute poll finds them. Later phases add agents on top.
 
 It ships with three kinds of sources: engineering blogs and release notes over RSS, Hacker News as a live stream, and a dependency radar that follows the release notes and security advisories of every package in your `package.json`.
 
 Everything runs on free, open-source tools, including the models. Answers come from a model on your own machine through Ollama, and the free tiers of Gemini and Groq can be added as fallbacks.
 
-## What works today (phases 1 to 3)
+## What works today (phases 1 to 4)
 
 - Connectors for RSS and Atom feeds, Hacker News (through its Algolia API) and OSV.dev security advisories. The default `sources.json` follows 30 engineering and release blogs plus the latest Hacker News stories and comments, about 5,600 documents on a first run.
 - Dependency radar. `npm run track -- path/to/package.json` adds each dependency's security advisories and, when the package lives on GitHub, its release notes.
@@ -18,14 +18,15 @@ Everything runs on free, open-source tools, including the models. Answers come f
 - A semantic cache. The same question asked again, even lightly reworded, gets the earlier answer back in under a second, as long as the documents it cites haven't changed.
 - What breaks when you upgrade. `npm run upgrade -- express 4.21.0 5.0.0` reads the release notes of every major and minor release in between, has the model pull out the breaking changes as JSON, and stores them, so a release is only read once.
 - An LLM eval with promptfoo that scores the model on both jobs: cited answers and reading breaking changes out of release notes.
+- A streaming pipeline. `npm run pipeline` syncs each source on its own BullMQ schedule, writes every change and its event in one transaction (the outbox pattern), publishes the events to Kafka, and lets consumer groups embed new documents and alert on new security advisories, with a dead-letter topic for events that keep failing.
 
 ## Quick start
 
-Needs Node 22.18+ and Docker, plus [Ollama](https://ollama.com) for answers.
+Needs Node 22.22+ and Docker, plus [Ollama](https://ollama.com) for answers.
 
 ```bash
 npm install
-docker compose up -d
+docker compose up -d                      # Postgres, Redpanda (Kafka) and Redis
 npm run migrate
 npm run ingest                            # sync, then embed what changed
 npm run search -- "how do teams avoid cache stampedes"
@@ -36,13 +37,15 @@ npm run usage                             # model calls, errors, latency and tok
 npm run track -- ../my-app/package.json   # then run npm run ingest again
 npm run eval                              # score every search mode
 npm run eval:llm                          # score the model with promptfoo
+npm run pipeline                          # keep everything in sync as events; Ctrl+C stops it
+npm run status                            # outbox backlog, Kafka lag, dead letters, sync jobs
 ```
 
 The first `ingest` downloads two small models (about 56 MB, kept in `node_modules`) and embeds every document once. For the default sources that's about 15,000 chunks, which took around half an hour on a 2-core machine and goes faster with more cores. After that, each run only embeds what changed.
 
 `npm run search` takes `--mode keyword|vector|hybrid|rerank` (default `rerank`) and `-n` for the number of results.
 
-Settings live in an optional `.env` file, and `.env.example` lists them: another Ollama model or address, Gemini and Groq keys, and the order to try providers in.
+Settings live in an optional `.env` file, and `.env.example` lists them: another Ollama model or address, Gemini and Groq keys and the order to try providers in, a GitHub token, the Kafka and Redis addresses, and a webhook for alerts.
 
 ## How search works
 
@@ -85,6 +88,40 @@ Gemini and Groq keys are free to create. Leave billing off on both accounts and 
 
 Notes that only point to a changelog file are flagged as too short to judge. Projects that spread a major's breaking changes over its betas only get what the final release's notes say; Express 5 is one of them.
 
+## The streaming pipeline
+
+`npm run ingest` is the batch way in: sync everything, embed what changed, exit. `npm run pipeline` keeps running and does the same work as a stream of events.
+
+```mermaid
+flowchart LR
+  B[BullMQ schedules<br/>HN every minute] --> W[sync worker<br/>Redis lock per feed]
+  W -->|documents and outbox rows,<br/>one transaction| P[(Postgres)]
+  P -->|LISTEN / NOTIFY| R[relay]
+  R -->|idempotent producer| K[[streamrag.documents]]
+  K --> E[embedder group]
+  K --> A[alerts group]
+  E -->|chunks| P
+  A -->|alerts, webhook| P
+  E -. after 3 tries .-> D[[dead-letter topic]]
+  A -. after 3 tries .-> D
+  D -. replayed by npm run dlq .-> K
+```
+
+1. BullMQ keeps one job scheduler per source in `sources.json`: Hacker News every minute, blogs every 15 minutes, advisories every 6 hours, or whatever an `every` field (in milliseconds) says. A worker syncs one feed per job, at most one a second, and retries a failed fetch with backoff.
+2. Each sync first takes a Redis lock on its feed (`SET NX PX` with a random token, released by a Lua compare-and-delete), since two syncs of one feed at once could close each other's documents.
+3. The sync writes its documents plus one outbox row for every document it added, changed or closed, in the same transaction. An event exists exactly when its change committed: a failed sync leaves none behind, and none can be lost after a commit.
+4. The relay wakes on `pg_notify` from that transaction, and every 5 seconds in case a notification was missed. It publishes the rows with an idempotent producer, keyed by document id so one document's events stay in order, and marks them published. A crash between publishing and marking sends them again, so delivery is at least once and the consumers have to cope with repeats.
+5. Two consumer groups read the topic and commit an offset only after handling its event:
+   - The embedder embeds the current version of every document the events name, up to 64 at a time. It compares content hashes, so a repeated or outdated event does nothing.
+   - The alerts group records each new security advisory once, for feeds past their first sync. An alert isn't naturally repeatable the way an embedding is, so a `processed_events` row is written in the same transaction as the alert. With `ALERT_WEBHOOK_URL` set, the alert goes to Slack or Discord too.
+6. An event that fails three times, with backoff, goes to `streamrag.documents.dlq` with its error, and the partition moves on. A failed batch is first redone one event at a time, so only the bad event ends up there. `npm run dlq` lists dead letters, and `npm run dlq -- --replay` sends them back once the bug is fixed; every consumer sees them again, which is safe because every consumer is idempotent.
+
+`--only relay,embedder` runs a subset of the roles, so each can run as its own process, and extra embedder processes split the topic's three partitions between them. `npm run status` shows the outbox backlog, how far behind each group is, the dead letters not yet replayed, and the sync jobs.
+
+On 2 CPU cores, a Hacker News poll that found 28 new comments had them embedded and searchable 2 seconds later. A backlog of about 300 documents went through in batches of 64 at roughly 5 a second, while a local model was busy on the same CPU.
+
+The pipeline tests start Postgres, Redpanda and Redis with Testcontainers and check each of these guarantees, from a failed sync leaving no events to a dead letter replaying exactly once. With a stand-in embedder, a sync commit is searchable about 200 ms later.
+
 ## Eval
 
 `npm run eval` starts its own Postgres in Docker, pulls the current OSV advisories for 40 popular npm packages, embeds them, and asks 56 questions in every mode. The questions are written the way a developer would ask them, mostly without the advisory's own wording, and each lists the advisories that answer it. A few are bare CVE IDs, which keyword search is good at and embeddings are not.
@@ -107,6 +144,29 @@ Two changes the eval decided:
 - Matching any word instead of all of them lifted keyword search alone from 0.14 to 0.77 recall@10, but dropped hybrid from 1.00 to 0.93 and its MRR from 0.91 to 0.74, because fusion trusts a noisy leg as much as a precise one. It was reverted.
 - The reranker pushed bare CVE IDs out of the top 10, since it was trained on natural questions. Queries that look like an identifier now keep the hybrid order, which brought rerank's recall@10 from 0.96 to 1.00. Those IDs still land at ranks 2 to 4 rather than first.
 
+### LLM eval
+
+`npm run eval:llm` uses promptfoo to score the model on the two jobs it has:
+
+- Answers: eight of the questions above, over the same advisories, plus two that no npm advisory can answer. An answer passes when it cites an advisory that answers the question and no source number it wasn't given. For the two unanswerable questions, it passes by citing nothing.
+- Extraction: four changelog sections pinned at release tags. Express 5.0.0 and ESLint 9.0.0 have breaking changes the model should find; the patch releases Express 5.0.1 and 4.21.1 have none.
+
+Llama 3.2 3B, October 2026:
+
+| suite | passed | score |
+|---|---|---|
+| answers with citations | 9/10 | 0.95 |
+| breaking changes from release notes | 4/4 | 1.00 |
+
+The one miss cited a different follow-redirects advisory than the one the question describes.
+
+The first extraction run passed 2 of 4. The model called a CVE fix in Express 5.0.1 breaking, and listed a single item for ESLint 9, which has 38 breaking changes, because a small model copies long lists badly. Two changes followed:
+
+- The prompt now says security fixes don't count either, unless the notes say behavior changes. That fixed Express 5.0.1.
+- Lines that conventional commits mark as breaking (`feat!:`, `BREAKING CHANGE:`) are taken straight from the notes, and the model only judges the rest. ESLint 9 passed after that, and the run got a third faster.
+
+`EVAL_MODELS=llama3.2:3b,qwen2.5:7b npm run eval:llm` compares models side by side, `npm run eval:llm -- extraction` runs one suite, and `cd eval/llm && npx promptfoo view` shows every answer. promptfoo ships SDKs for dozens of model providers as optional packages, over 1 GB of them, so it lives in `eval/llm` with its own `package.json` and installs without them, at about 280 MB.
+
 ## How it's built
 
 ```
@@ -114,6 +174,7 @@ src/
   core/         storage, sync, chunking, embedding, search, answers and extraction (Postgres + pgvector)
   connectors/   one file per source type: rss, hackernews, osv
   llm/          the gateway, a streaming client for OpenAI-compatible APIs, provider settings
+  pipeline/     schedules and locks (BullMQ, Redis), the outbox relay, consumers and dead letters (Kafka)
   track.ts      turns a package.json into sources
   upgrade.ts    finds the releases an upgrade crosses and their notes
   cli.ts
@@ -130,14 +191,14 @@ eval/llm/       the promptfoo eval, with its own package.json
 - The cache is a table too. Each row of `answers` keeps the question's embedding (HNSW-indexed), the numbered sources with their content hashes, and which of them the answer cited.
 - Ollama, Gemini and Groq all offer an OpenAI-compatible chat API, so one small client (`fetch` plus a server-sent events parser) covers all three without an SDK.
 - Fetching is polite: one request a second, an identifying User-Agent, public endpoints only.
-- The tests run against a real Postgres through Testcontainers, locally and in GitHub Actions, with stand-in models, a scripted gateway and faked npm and GitHub responses, so CI downloads nothing and calls no model.
+- The tests run against real Postgres, Redpanda and Redis through Testcontainers, locally and in GitHub Actions, with stand-in models, a scripted gateway and faked npm and GitHub responses, so CI downloads no model and calls none.
 
 ## Roadmap
 
 1. Core sync, full-text search, RSS, Hacker News and the dependency radar (done)
 2. Embeddings with pgvector, hybrid keyword + vector search, reranking, and an eval set that measures retrieval quality (done)
 3. LLM layer: a gateway across local Ollama, Gemini and Groq with rate limits, retries, fallback and a circuit breaker, a semantic cache, streamed answers with citations, breaking changes pulled out of release notes as JSON, and a promptfoo eval (done)
-4. Event pipeline: Kafka (Redpanda) with Hacker News as the live stream, the outbox pattern, idempotent consumers, a dead-letter topic, BullMQ schedules and Redis locks
+4. Event pipeline: Kafka (Redpanda) with Hacker News as the live stream, the outbox pattern, idempotent consumers, a dead-letter topic, BullMQ schedules and Redis locks (done)
 5. Media connector: FFmpeg and Whisper turn dev podcasts and conference talks into timestamped, searchable text, and answers link to the exact moment
 6. APIs: GraphQL, streamed answers, a LangGraph agent and an MCP server, so coding assistants can ask about your dependencies
 7. Web dashboard (Next.js) with live updates
