@@ -1,12 +1,12 @@
 # streamrag
 
-A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Run as a streaming pipeline on Kafka, it makes new Hacker News comments searchable a couple of seconds after each one-minute poll finds them. Later phases add agents on top.
+A real-time RAG engine. It keeps a constantly changing knowledge base in sync, searches it with hybrid keyword and vector search plus reranking, and answers questions from it with citations. Run as a streaming pipeline on Kafka, it makes new Hacker News comments searchable a couple of seconds after each one-minute poll finds them. It answers through a CLI, a GraphQL API that streams, an MCP server for coding assistants, and a LangGraph agent that looks things up before it answers.
 
 It ships with four kinds of sources: engineering blogs and release notes over RSS, Hacker News as a live stream, a dependency radar that follows the release notes and security advisories of every package in your `package.json`, and developer podcasts, transcribed locally with FFmpeg and Whisper so search can land on the minute a topic comes up.
 
 Everything runs on free, open-source tools, including the models. Answers come from a model on your own machine through Ollama, and the free tiers of Gemini and Groq can be added as fallbacks.
 
-## What works today (phases 1 to 5)
+## What works today (phases 1 to 6)
 
 - Connectors for RSS and Atom feeds, Hacker News (through its Algolia API) and OSV.dev security advisories. The default `sources.json` follows 30 engineering and release blogs plus the latest Hacker News stories and comments, about 5,600 documents on a first run.
 - Dependency radar. `npm run track -- path/to/package.json` adds each dependency's security advisories and, when the package lives on GitHub, its release notes.
@@ -19,6 +19,8 @@ Everything runs on free, open-source tools, including the models. Answers come f
 - What breaks when you upgrade. `npm run upgrade -- express 4.21.0 5.0.0` reads the release notes of every major and minor release in between, has the model pull out the breaking changes as JSON, and stores them, so a release is only read once.
 - An LLM eval with promptfoo that scores the model on both jobs: cited answers and reading breaking changes out of release notes.
 - A streaming pipeline. `npm run pipeline` syncs each source on its own BullMQ schedule, writes every change and its event in one transaction (the outbox pattern), publishes the events to Kafka, and lets consumer groups embed new documents and alert on new security advisories, with a dead-letter topic for events that keep failing.
+- APIs. `npm run serve` is a GraphQL API whose answers stream as server-sent events, and `npm run mcp` is an MCP server, so Claude Code, Claude Desktop or Cursor can search your sources and check upgrades and advisories while they work.
+- An agent. `npm run agent` is a LangGraph graph around native tool calling: the model calls `breaking_changes`, `security_advisories` or `search`, reads the results and answers, and each thread remembers its earlier questions.
 - Podcasts and talks. Any RSS item with an audio file is an episode. `npm run transcribe` streams it through FFmpeg into Whisper and stores a transcript with a time mark about every 30 seconds, so search results and citations link to the moment (`episode.mp3#t=1262`). In the pipeline, new episodes get transcribed as they arrive.
 
 ## Quick start
@@ -33,6 +35,7 @@ npm run ingest                            # sync, then embed what changed
 npm run search -- "how do teams avoid cache stampedes"
 ollama pull llama3.2:3b                   # the default answer model, about 2 GB
 npm run ask -- "how does Cloudflare D1 scale to millions of databases?"
+npm run agent -- "what breaks if I upgrade express from 4.21.0 to the latest version?"
 npm run upgrade -- express 4.21.0 5.0.0   # what breaks between two versions
 npm run transcribe                        # the newest podcast episode; npm run ingest then embeds it
 npm run usage                             # model calls, errors, latency and tokens
@@ -41,6 +44,8 @@ npm run eval                              # score every search mode
 npm run eval:llm                          # score the model with promptfoo
 npm run pipeline                          # keep everything in sync as events; Ctrl+C stops it
 npm run status                            # outbox backlog, Kafka lag, dead letters, sync jobs
+npm run serve                             # GraphQL, with GraphiQL at http://localhost:4000/graphql
+npm run mcp                               # MCP server over stdio, for coding assistants
 ```
 
 The first `ingest` downloads two small models (about 56 MB, kept in `node_modules`) and embeds every document once. For the default sources that's about 15,000 chunks, which took around half an hour on a 2-core machine and goes faster with more cores. After that, each run only embeds what changed.
@@ -136,6 +141,32 @@ The newest Software Engineering Daily episode, 47 minutes long, came out at 9,34
 
 With the 3B model, an answer drawn from a transcript sometimes cites the episode's show notes instead, since the two share a title. `WHISPER_MODEL=Xenova/whisper-base` handles talks in other languages, and `whisper-tiny.en` is a little faster and less accurate.
 
+## APIs and the agent
+
+`npm run serve` starts a GraphQL API (GraphQL Yoga) at `http://localhost:4000/graphql`, with GraphiQL on the same URL. Queries cover `search`, `upgrade`, `alerts` and `status`. Two subscriptions stream over server-sent events, so plain `fetch`, `curl` or an `EventSource` can read them as they're written:
+
+- `ask` sends the numbered sources, then each token, then which sources the answer cited.
+- `agent` sends each tool call as the agent makes it, then the answer's tokens. Passing the same `thread` again asks a follow-up.
+
+```bash
+curl -N http://localhost:4000/graphql -H 'content-type: application/json' -H 'accept: text/event-stream' \
+  -d '{"query":"subscription { ask(question: \"How does Cloudflare D1 scale?\") { ... on AnswerToken { text } } }"}'
+```
+
+`npm run mcp` is an MCP server over stdio with three tools, the same ones the agent uses:
+
+- `search`: everything synced, with links.
+- `breaking_changes`: what breaks between two versions of an npm package.
+- `security_advisories`: OSV advisories for a package, or only those that affect a given version.
+
+To add it to Claude Code, run `claude mcp add streamrag -- node /path/to/streamrag/src/mcp.ts`. For Claude Desktop, add it under `mcpServers` with `"command": "node"` and `"args": ["/path/to/streamrag/src/mcp.ts"]`. The assistant's own model does the reasoning, and streamrag supplies what it knows about the code's dependencies.
+
+The agent (`npm run agent`, or the subscription) is a LangGraph graph of two nodes. The model node calls the gateway with the tools' JSON schemas, which come from the same zod definitions the MCP server registers. A conditional edge sends any tool calls to the tool node, which runs them in parallel and returns the results, and the loop repeats until the model answers. A call that fails, whether to a tool that doesn't exist or with arguments that don't validate, comes back to the model as a readable error rather than ending the run. After three rounds of tool calls on one question the tools are withheld, so a model that keeps calling them still has to answer. A checkpointer keeps each thread's messages.
+
+Tool calling goes through the same gateway as everything else, with the same retries and fallback. The client puts streamed tool-call fragments back together, which Ollama, Gemini, Groq and llama.cpp all send in the OpenAI format.
+
+Llama 3.2 3B on 2 CPU cores answered "What breaks if I upgrade express from 5.0.0 to the latest version?" in about three minutes. It made three tool calls and came back with no breaking changes in 5.1.0 through 5.3.0, no advisories for 5.0.0, and a link to the release notes. The first tries showed what a small model sends: `"to": "latest"` and `"limit": "5"` as a string, so the tools now accept both. Each tool result also opens with a one-line verdict now; before that, the model's answer skipped what the tool had found and suggested searching instead.
+
 ## Eval
 
 `npm run eval` starts its own Postgres in Docker, pulls the current OSV advisories for 40 popular npm packages, embeds them, and asks 56 questions in every mode. The questions are written the way a developer would ask them, mostly without the advisory's own wording, and each lists the advisories that answer it. A few are bare CVE IDs, which keyword search is good at and embeddings are not.
@@ -190,6 +221,8 @@ src/
   llm/          the gateway, a streaming client for OpenAI-compatible APIs, provider settings
   pipeline/     schedules and locks (BullMQ, Redis), the outbox relay, consumers and dead letters (Kafka)
   media/        FFmpeg decoding and Whisper transcripts
+  agent/        the tools and the LangGraph agent
+  api/          GraphQL (Yoga) and MCP servers; serve.ts and mcp.ts start them
   track.ts      turns a package.json into sources
   upgrade.ts    finds the releases an upgrade crosses and their notes
   cli.ts
@@ -215,7 +248,7 @@ eval/llm/       the promptfoo eval, with its own package.json
 3. LLM layer: a gateway across local Ollama, Gemini and Groq with rate limits, retries, fallback and a circuit breaker, a semantic cache, streamed answers with citations, breaking changes pulled out of release notes as JSON, and a promptfoo eval (done)
 4. Event pipeline: Kafka (Redpanda) with Hacker News as the live stream, the outbox pattern, idempotent consumers, a dead-letter topic, BullMQ schedules and Redis locks (done)
 5. Media connector: FFmpeg and Whisper turn dev podcasts and conference talks into timestamped, searchable text, and answers link to the exact moment (done)
-6. APIs: GraphQL, streamed answers, a LangGraph agent and an MCP server, so coding assistants can ask about your dependencies
+6. APIs: GraphQL, streamed answers, a LangGraph agent and an MCP server, so coding assistants can ask about your dependencies (done)
 7. Web dashboard (Next.js) with live updates
 8. Observability and load testing: OpenTelemetry, Langfuse, Prometheus, Grafana, k6 and Playwright
 
