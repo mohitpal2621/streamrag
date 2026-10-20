@@ -1,43 +1,46 @@
-import { AutoModelForSequenceClassification, AutoTokenizer, pipeline } from '@huggingface/transformers';
+import { fork, type ChildProcess } from 'node:child_process';
 
 export type Embed = (texts: string[], kind: 'query' | 'passage') => Promise<number[][]>;
 export type Rerank = (query: string, texts: string[]) => Promise<number[]>;
 
-// Small free models that run on the CPU. They download once from Hugging Face (about 56 MB)
-// into node_modules, then work offline.
-const EMBED_MODEL = 'Xenova/bge-small-en-v1.5'; // 384 dimensions, matches vector(384) in the schema
-const RERANK_MODEL = 'Xenova/ms-marco-MiniLM-L-6-v2';
+// Model inference blocks the thread it runs on: a rerank of 30 chunks held the event loop for over a
+// second on 2 cores, which stalled every other request in the API and would starve Kafka's
+// heartbeats in the pipeline. So each model runs in a child process of its own (models-worker.ts),
+// and a query's embedding never waits behind a rerank. (Worker threads would be lighter, but
+// onnxruntime-node crashes when two threads of one process use it.)
+function childProcess(model: 'embed' | 'rerank') {
+  let child: ChildProcess | undefined;
+  let next = 0;
+  const pending = new Map<number, { resolve: (value: never) => void; reject: (err: Error) => void }>();
+  // An idle model mustn't keep a finished command running.
+  const hold = (on: boolean) => {
+    for (const handle of [child, child?.channel]) on ? handle?.ref() : handle?.unref();
+  };
+  const fail = (err: Error) => {
+    for (const p of pending.values()) p.reject(err);
+    pending.clear();
+    child = undefined;
+  };
+  return (...args: unknown[]) => {
+    if (!child) {
+      // Without the parent's flags: the model process needs no telemetry preload of its own.
+      child = fork(new URL('./models-worker.ts', import.meta.url), [model], { execArgv: [], serialization: 'advanced' });
+      child.on('message', ({ id, result, error }: { id: number; result: never; error?: string }) => {
+        const p = pending.get(id);
+        pending.delete(id);
+        if (error) p?.reject(new Error(error));
+        else p?.resolve(result);
+        if (!pending.size) hold(false);
+      });
+      child.on('error', fail);
+      child.on('exit', (code, signal) => fail(new Error(`the ${model} model's process exited (${signal ?? code})`)));
+    }
+    hold(true);
+    const id = next++;
+    child.send({ id, args });
+    return new Promise<never>((resolve, reject) => pending.set(id, { resolve, reject }));
+  };
+}
 
-// Texts per model call. Memory grows with batch size times sequence length squared, and one call
-// over a few hundred long chunks needed 6 GB before this cap.
-const BATCH = 16;
-
-let extractor: ReturnType<typeof loadExtractor> | undefined;
-const loadExtractor = () => pipeline('feature-extraction', EMBED_MODEL, { dtype: 'q8' });
-
-export const embed: Embed = async (texts, kind) => {
-  extractor ??= loadExtractor();
-  const model = await extractor;
-  // bge expects this instruction on the query only, never on the passages being searched.
-  const input = kind === 'query' ? texts.map((t) => `Represent this sentence for searching relevant passages: ${t}`) : texts;
-  const vectors: number[][] = [];
-  for (let i = 0; i < input.length; i += BATCH) {
-    const output = await model(input.slice(i, i + BATCH), { pooling: 'cls', normalize: true });
-    vectors.push(...output.tolist());
-  }
-  return vectors;
-};
-
-let reranker: ReturnType<typeof loadReranker> | undefined;
-const loadReranker = () =>
-  Promise.all([AutoTokenizer.from_pretrained(RERANK_MODEL), AutoModelForSequenceClassification.from_pretrained(RERANK_MODEL, { dtype: 'q8' })]);
-
-// A cross-encoder reads the query and the passage together, which is slower than comparing
-// embeddings but much better at judging relevance, so it only sees the top few candidates.
-export const rerank: Rerank = async (query, texts) => {
-  reranker ??= loadReranker();
-  const [tokenizer, model] = await reranker;
-  const inputs = tokenizer(texts.map(() => query), { text_pair: texts, padding: true, truncation: true });
-  const { logits } = await model(inputs);
-  return logits.tolist().map((row: number[]) => row[0]);
-};
+export const embed: Embed = childProcess('embed');
+export const rerank: Rerank = childProcess('rerank');
