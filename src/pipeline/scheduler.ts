@@ -4,6 +4,7 @@ import type { Redis } from 'ioredis';
 import type pg from 'pg';
 import type { Connector, Source } from '../core/ingest.ts';
 import { syncFeed } from '../core/store.ts';
+import { traced, tracer } from '../tracing.ts';
 
 export const SYNC_QUEUE = 'streamrag-sync';
 
@@ -60,8 +61,8 @@ export function startSyncWorker(db: pg.Pool, redis: Redis, connectors: Record<st
       const { connector, feed } = job.data as Source;
       const c = connectors[connector];
       if (!c) throw new Error(`unknown connector "${connector}"`);
-      const r = await withLock(redis, `streamrag:sync:${connector}:${feed}`, 5 * 60_000, async () =>
-        syncFeed(db, connector, feed, await c.fetchFeed(feed), c.snapshot),
+      const r = await withLock(redis, `streamrag:sync:${connector}:${feed}`, 5 * 60_000, () =>
+        traced(tracer, 'sync job', { 'sync.connector': connector, 'sync.feed': feed }, async () => syncFeed(db, connector, feed, await c.fetchFeed(feed), c.snapshot)),
       );
       if (r.held) return 'skipped: another worker is syncing this feed';
       const { inserted, updated, closed } = r.value;

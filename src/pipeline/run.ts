@@ -10,6 +10,7 @@ import { Redis } from 'ioredis';
 import { connectors } from '../connectors/index.ts';
 import { embed } from '../core/models.ts';
 import { connect } from '../core/store.ts';
+import { serveMetrics } from '../metrics.ts';
 import { alerter, embedder, startConsumer, transcriber } from './consumers.ts';
 import { createProducer, ensureTopics } from './kafka.ts';
 import { startRelay } from './relay.ts';
@@ -46,12 +47,16 @@ if (roles.includes('scheduler')) {
 if (roles.includes('relay')) stops.push(await startRelay(db, producer, log));
 for (const [role, handler] of [['embedder', embedder(db, embed, log)], ['alerts', alerter(db, log)], ['transcriber', transcriber(db, log)]] as const) {
   if (!roles.includes(role)) continue;
-  // Embedding is cheaper per document in batches; the others go one event at a time.
-  const consumer = await startConsumer(role, handler, producer, log, { batchSize: role === 'embedder' ? 64 : 1 });
+  // Embedding is cheaper per document in batches, and alerts skip most events, so both take what has
+  // arrived, up to 64 at a time. A transcription can take many minutes, so those go one at a time.
+  const consumer = await startConsumer(role, handler, producer, log, { batchSize: role === 'transcriber' ? 1 : 64 });
   consumer.done.catch(fatal(role));
   stops.push(consumer.stop);
 }
-log(`pipeline running: ${roles.join(', ')}. Ctrl+C stops it.`);
+const metricsPort = Number(process.env.PIPELINE_METRICS_PORT ?? 9465);
+const metrics = serveMetrics(metricsPort, log);
+stops.push(async () => metrics.close());
+log(`pipeline running: ${roles.join(', ')}, metrics on :${metricsPort}/metrics. Ctrl+C stops it.`);
 
 let stopping = false;
 const shutdown = async () => {

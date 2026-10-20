@@ -42,5 +42,150 @@ services:
       interval: 2s
       retries: 30
 
+  # docker compose --profile observability up -d: metrics, traces and a dashboard for them.
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: [observability]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # the API and the pipeline run on the host
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    profiles: [observability]
+    ports:
+      - "127.0.0.1:16686:16686" # UI
+      - "127.0.0.1:4318:4318" # OTLP over HTTP
+
+  # Signed in as an admin with no password, which is why every port here only listens on localhost.
+  grafana:
+    image: grafana/grafana:13.2.4
+    profiles: [observability]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/streamrag.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3001:3000"
+
+  # docker compose --profile langfuse up -d: self-hosted Langfuse for the model calls, at
+  # http://localhost:3030. Sign in as admin@streamrag.local / streamrag-local. The project's keys
+  # and every password below are for this machine only; change them before exposing it anywhere.
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    profiles: [langfuse]
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+    environment: &langfuse-env
+      NEXTAUTH_URL: http://localhost:3030
+      NEXTAUTH_SECRET: streamrag-local
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/postgres
+      SALT: streamrag-local
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: streamrag-local
+      LANGFUSE_INIT_ORG_ID: streamrag
+      LANGFUSE_INIT_ORG_NAME: streamrag
+      LANGFUSE_INIT_PROJECT_ID: streamrag
+      LANGFUSE_INIT_PROJECT_NAME: streamrag
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-streamrag-local
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-streamrag-local
+      LANGFUSE_INIT_USER_EMAIL: admin@streamrag.local
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: streamrag-local
+    ports:
+      - "127.0.0.1:3030:3000"
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    profiles: [langfuse]
+    depends_on: *langfuse-depends-on
+    environment: *langfuse-env
+
+  langfuse-postgres:
+    image: pgvector/pgvector:pg16
+    profiles: [langfuse]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - langfuse-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      retries: 30
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    profiles: [langfuse]
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse-clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 2s
+      retries: 30
+
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    profiles: [langfuse]
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    volumes:
+      - langfuse-minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      retries: 30
+
+  langfuse-redis:
+    image: redis:8.8-alpine
+    profiles: [langfuse]
+    command: --requirepass streamrag-local --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "streamrag-local", "ping"]
+      interval: 2s
+      retries: 30
+
 volumes:
   pgdata:
+  langfuse-pgdata:
+  langfuse-clickhouse:
+  langfuse-minio:

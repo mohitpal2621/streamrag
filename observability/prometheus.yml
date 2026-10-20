@@ -1,0 +1,11 @@
+# Scrapes the API (npm run serve) and the pipeline (npm run pipeline) running on the host.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: streamrag-api
+    static_configs:
+      - targets: ["host.docker.internal:4000"]
+  - job_name: streamrag-pipeline
+    static_configs:
+      - targets: ["host.docker.internal:9465"]
