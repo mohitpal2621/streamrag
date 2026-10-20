@@ -6,9 +6,14 @@ It ships with four kinds of sources: engineering blogs and release notes over RS
 
 Everything runs on free, open-source tools, including the models. Answers come from a model on your own machine through Ollama, and the free tiers of Gemini and Groq can be added as fallbacks.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/live-dark.png">
+  <img alt="The dashboard's Live page: Hacker News comments syncing every minute and turning searchable, the pipeline's stages, security alerts and each feed's next sync" src="docs/live.png">
+</picture>
+
 ## What works today (phases 1 to 8)
 
-- Connectors for RSS and Atom feeds, Hacker News (through its Algolia API) and OSV.dev security advisories. The default `sources.json` follows 30 engineering and release blogs plus the latest Hacker News stories and comments, about 5,600 documents on a first run.
+- Connectors for RSS and Atom feeds, Hacker News (through its Algolia API) and OSV.dev security advisories. The default `sources.json` follows 30 engineering and release blogs plus the latest Hacker News stories and comments, about 5,700 documents on a first run.
 - Dependency radar. `npm run track -- path/to/package.json` adds each dependency's security advisories and, when the package lives on GitHub, its release notes.
 - Incremental sync. A content hash skips unchanged documents and catches edited ones. Snapshot sources list everything that exists, so whatever they stop listing gets closed. Append-only feeds like RSS and Hacker News keep items open after they roll off. A source that fails to fetch is skipped and left as it was.
 - Incremental embedding. Only new or changed documents get re-chunked and re-embedded, a batch at a time, so an interrupted run resumes where it stopped.
@@ -25,41 +30,138 @@ Everything runs on free, open-source tools, including the models. Answers come f
 - Observability and load tests. The API and the pipeline send OpenTelemetry traces to Jaeger, and the model calls go to Langfuse as generations. Prometheus scrapes both processes and Grafana opens on a streamrag dashboard. `npm run load` runs k6 scenarios against the API.
 - Podcasts and talks. Any RSS item with an audio file is an episode. `npm run transcribe` streams it through FFmpeg into Whisper and stores a transcript with a time mark about every 30 seconds, so search results and citations link to the moment (`episode.mp3#t=1262`). In the pipeline, new episodes get transcribed as they arrive.
 
-## Quick start
+## How to run it
 
-Needs Node 22.22+ and Docker, plus [Ollama](https://ollama.com) for answers and [FFmpeg](https://ffmpeg.org) for podcasts.
+You need Node.js 22.22 or newer and Docker. Answers need a local model, through [Ollama](https://ollama.com) or llama.cpp, and podcasts need [FFmpeg](https://ffmpeg.org). Search works without either.
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Node.js 22.22+ | [nodejs.org](https://nodejs.org) or your package manager | `brew install node` | `winget install OpenJS.NodeJS.LTS` |
+| Docker | Docker Engine | Docker Desktop | Docker Desktop |
+| Ollama | `curl -fsSL https://ollama.com/install.sh \| sh` | `brew install ollama` | `winget install Ollama.Ollama` |
+| FFmpeg | `sudo apt install ffmpeg` | `brew install ffmpeg` | `winget install Gyan.FFmpeg` |
+
+### 1. Start the databases and sync
 
 ```bash
+git clone https://github.com/mohitpal2621/streamrag.git
+cd streamrag
 npm install
-docker compose up -d                      # Postgres, Redpanda (Kafka) and Redis
-npm run migrate
-npm run ingest                            # sync, then embed what changed
-npm run search -- "how do teams avoid cache stampedes"
-ollama pull llama3.2:3b                   # the default answer model, about 2 GB
-npm run ask -- "how does Cloudflare D1 scale to millions of databases?"
-npm run agent -- "what breaks if I upgrade express from 4.21.0 to the latest version?"
-npm run upgrade -- express 4.21.0 5.0.0   # what breaks between two versions
-npm run transcribe                        # the newest podcast episode; npm run ingest then embeds it
-npm run usage                             # model calls, errors, latency and tokens
-npm run track -- ../my-app/package.json   # then run npm run ingest again
-npm run eval                              # score every search mode
-npm run eval:llm                          # score the model with promptfoo
-npm run pipeline                          # keep everything in sync as events; Ctrl+C stops it
-npm run status                            # outbox backlog, Kafka lag, dead letters, sync jobs
-npm run serve                             # GraphQL, with GraphiQL at http://localhost:4000/graphql
-npm run mcp                               # MCP server over stdio, for coding assistants
-docker compose --profile observability up -d   # Prometheus, Grafana and Jaeger
-SCENARIO=search MODE=hybrid npm run load  # k6 against the running API
-cd web && npm install && npm run dev      # the dashboard at http://localhost:3000, while npm run serve runs
+docker compose up -d     # Postgres with pgvector, Redpanda (Kafka) and Redis
+npm run migrate          # creates the tables and prints "schema ready"
+npm run ingest           # syncs every feed in sources.json, then embeds what changed
 ```
 
-The first `ingest` downloads two small models (about 56 MB, kept in `node_modules`) and embeds every document once. For the default sources that's about 15,000 chunks, which took around half an hour on a 2-core machine and goes faster with more cores. After that, each run only embeds what changed.
+The first `ingest` downloads two small models (about 56 MB, kept in `node_modules`) and embeds every document once. On a fresh clone on a 2-core machine it synced 5,751 documents from 33 feeds into 15,142 chunks in 11 minutes. After that, each run only fetches and embeds what changed.
 
-`npm run search` takes `--mode keyword|vector|hybrid|rerank` (default `rerank`) and `-n` for the number of results.
+### 2. Search and ask
 
-Settings live in an optional `.env` file, and `.env.example` lists them: another Ollama model or address, Gemini and Groq keys and the order to try providers in, a GitHub token, the Kafka and Redis addresses, and a webhook for alerts.
+```bash
+npm run search -- "how do teams avoid cache stampedes"
+ollama pull llama3.2:3b  # the answer model, about 2 GB
+npm run ask -- "How does request collapsing prevent cache stampedes?"
+npm run agent -- "Which security advisories affect lodash 4.17.20?"
+```
+
+`search` prints each document it finds with its best chunk:
+
+```
+1. Request collapsing for ISR cache misses  [rss]
+   https://vercel.com/changelog/request-collapsing-for-isr-cache-misses
+   The Vercel CDN now prevents cache stampedes through request collapsing on an expired Incremental Static Regeneration (ISR) page into a single function invocation per region. Without collapsing, simultaneous requests each…
+
+2. Preventing the stampede: Request collapsing in the Vercel CDN  [rss]
+   https://vercel.com/blog/cdn-request-collapsing
+   When you deploy a Next.js app with Incremental Static Regeneration (ISR), pages get regenerated on-demand after their cache expires. ISR lets you get the performance benefits of static generation wh…
+```
+
+`npm run search` takes `-m keyword|vector|hybrid|rerank` (default `rerank`) and `-n` for the number of results. `ask` streams its answer, then lists the sources it cited. On that fresh clone, with 2 CPU cores and no GPU, the answer took 37 seconds and the agent 82, most of it the model reading its sources. The same question again, even reworded a little, comes back from the cache in under a second.
+
+To use llama.cpp instead of Ollama, serve the model under Ollama's name and port, and nothing else changes:
+
+```bash
+llama-server -m Llama-3.2-3B-Instruct-Q4_K_M.gguf --alias llama3.2:3b --port 11434 --jinja -c 4096
+```
+
+### 3. Run it live, with the dashboard
+
+Three terminals, each in the streamrag folder:
+
+```bash
+npm run pipeline                       # keeps every feed in sync, through the outbox and Kafka
+npm run serve                          # the GraphQL API, with GraphiQL at http://localhost:4000/graphql
+cd web && npm install && npm run dev   # the dashboard at http://localhost:3000
+```
+
+Open http://localhost:3000. Hacker News is polled every minute, so new stories and comments show up under Latest changes as each sync commits, first as Waiting and then with how long they took to become searchable. The Ask page answers from everything synced so far, and `npm run status` shows the pipeline's backlog in the terminal.
+
+### 4. Everything else
+
+```bash
+npm run upgrade -- express 4.21.0 5.0.0   # what breaks between two versions of a package
+npm run track -- ../my-app/package.json   # follow your own dependencies, then npm run ingest
+npm run transcribe                        # the newest podcast episode, then npm run ingest
+npm run status                            # outbox backlog, Kafka lag, dead letters, sync jobs
+npm run usage                             # model calls, errors, latency and tokens this week
+npm run mcp                               # the MCP server, for Claude Code, Claude Desktop or Cursor
+npm run eval                              # score every search mode on the eval set
+npm run eval:llm                          # score the model with promptfoo
+npm test                                  # the backend tests, against real containers
+cd web && npm test                        # the dashboard's Playwright tests
+```
+
+The observability stack and Langfuse are optional Docker Compose profiles, and k6 load tests run against the API; [Observability and load testing](#observability-and-load-testing) has the commands.
+
+Settings live in an optional `.env` file (copy `.env.example`, which lists them all): another Ollama model or address, Gemini and Groq keys and the order to try providers in, a GitHub token, the Kafka and Redis addresses, and a webhook for alerts.
+
+| Port | What listens there |
+|---|---|
+| 3000 | the dashboard |
+| 4000 | the GraphQL API, and its metrics at `/metrics` |
+| 5432, 19092, 6379 | Postgres, Kafka (Redpanda) and Redis |
+| 11434 | Ollama, or llama-server |
+| 9465 | the pipeline's metrics |
+| 3001, 9090, 16686 | Grafana, Prometheus and Jaeger, with `--profile observability` |
+| 3030 | Langfuse, with `--profile langfuse` |
+
+<details>
+<summary>On Windows</summary>
+
+- Everything above works in PowerShell. Environment variables are set differently there: `$env:SCENARIO="search"; $env:MODE="hybrid"; npm run load`.
+- `npm run load` starts k6 in Docker with `--network host`. Docker Desktop needs host networking turned on for that (Docker Desktop 4.34 or later, signed in: Settings, Resources, Network, Enable host networking). Or install k6 (`winget install k6 --source winget`) and run `k6 run load/k6.js`.
+- Ollama keeps its models in `OLLAMA_MODELS`. Set it to a folder on another drive before `ollama pull` if `C:` is short on space.
+- `Copy-Item .env.example .env` makes the settings file.
+
+</details>
+
+<details>
+<summary>Stopping, and starting over</summary>
+
+- Ctrl+C stops the pipeline, the API and the dashboard. `docker compose stop` stops the databases and keeps their data.
+- `docker compose down -v` deletes the data too. Run `npm run migrate` and `npm run ingest` again afterwards.
+
+</details>
+
+<details>
+<summary>When something doesn't work</summary>
+
+- `Error: connect ECONNREFUSED 127.0.0.1:5432`: Postgres isn't running. Start Docker, then `docker compose up -d`.
+- `no provider could answer (ollama: TypeError: fetch failed (connect ECONNREFUSED 127.0.0.1:11434))`: nothing is serving the model. Start Ollama (the app, or `ollama serve`) and pull the model, or start `llama-server` as above.
+- `ffmpeg is not installed`: install FFmpeg (see the table above) or point `FFMPEG_PATH` at it.
+- The dashboard says "The streamrag API isn't answering": start `npm run serve`. If the API runs somewhere else, set `API_URL` when starting the dashboard.
+- `docker compose up` says a port is already allocated: another Postgres, Redis or Kafka is using it. Stop that one first.
+- `.env not found. Continuing without it.` only means there is no settings file, so the defaults apply.
+
+</details>
 
 ## How search works
+
+One question on its way through search and into an answer, with the results streamrag returned for it and the answer the local model wrote:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/answer-dark.svg">
+  <img alt="Animation: the question goes to keyword and vector search, the two lists are fused, a cross-encoder reranks the top 30, and the model writes an answer that cites the second source. Asked again in other words, the answer comes from the cache in 39 ms." src="docs/answer.svg">
+</picture>
 
 1. Each document is split into overlapping ~200-word chunks, and every chunk starts with the document's title, so it still says what it's about when retrieved alone.
 2. Every chunk gets a 384-dimension embedding from `bge-small-en-v1.5`, stored in pgvector with an HNSW index, and a `tsvector` with a GIN index.
@@ -104,20 +206,10 @@ Notes that only point to a changelog file are flagged as too short to judge. Pro
 
 `npm run ingest` is the batch way in: sync everything, embed what changed, exit. `npm run pipeline` keeps running and does the same work as a stream of events.
 
-```mermaid
-flowchart LR
-  B[BullMQ schedules<br/>HN every minute] --> W[sync worker<br/>Redis lock per feed]
-  W -->|documents and outbox rows,<br/>one transaction| P[(Postgres)]
-  P -->|LISTEN / NOTIFY| R[relay]
-  R -->|idempotent producer| K[[streamrag.documents]]
-  K --> E[embedder group]
-  K --> A[alerts group]
-  E -->|chunks| P
-  A -->|alerts, webhook| P
-  E -. after 3 tries .-> D[[dead-letter topic]]
-  A -. after 3 tries .-> D
-  D -. replayed by npm run dlq .-> K
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/pipeline-dark.svg">
+  <img alt="Animation: a new Hacker News comment goes from the poll to the sync worker, into Postgres with its outbox row in one transaction, through the relay into a Kafka partition, and to each consumer group. The embedder writes its chunk back to Postgres, and the Live page shows it as searchable after 0.8 seconds." src="docs/pipeline.svg">
+</picture>
 
 1. BullMQ keeps one job scheduler per source in `sources.json`: Hacker News every minute, blogs every 15 minutes, advisories every 6 hours, or whatever an `every` field (in milliseconds) says. A worker syncs one feed per job, at most one a second, and retries a failed fetch with backoff.
 2. Each sync first takes a Redis lock on its feed (`SET NX PX` with a random token, released by a Lua compare-and-delete), since two syncs of one feed at once could close each other's documents.
@@ -136,13 +228,18 @@ The pipeline tests start Postgres, Redpanda and Redis with Testcontainers and ch
 
 ## Podcasts and talks
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/podcast-dark.svg">
+  <img alt="Animation: FFmpeg decodes a 47-minute episode five minutes at a time and Whisper transcribes each block. A search for branching timelines after a node crashes lands on the paragraph at 21:02 and links to the MP3 at #t=1262." src="docs/podcast.svg">
+</picture>
+
 1. The RSS connector treats an item with an audio enclosure as an episode and keeps its length from `itunes:duration`. The default sources include Software Engineering Daily; conference talks work the same way wherever there's an audio feed, like media.ccc.de's per-congress MP3 feeds.
 2. FFmpeg reads the episode straight from its URL, in whatever format, and writes 16 kHz mono 32-bit float samples to stdout: `ffmpeg -i <url> -vn -ac 1 -ar 16000 -f f32le pipe:1`. They arrive in five-minute blocks, so a three-hour episode never sits in memory whole, and `--minutes` stops the download early. FFmpeg stops reading while Whisper works through a block, which is long enough for a CDN to drop the connection, so it runs with `-reconnect 1` and asks for the rest with a range request. A transcript that still ends more than 2% short of the feed's `itunes:duration` fails instead of being stored, so it gets retried.
 3. Whisper (`whisper-base.en` through transformers.js, on the CPU) turns each block into timed segments. Those get merged into paragraphs of about 30 seconds, each opening with its start time, so any chunk of a transcript says roughly where in the episode it is.
 4. The transcript is a document of its own, keyed like its episode, so sync, embedding, search and answers handle it with no special cases. Its URL is the audio file, and a search hit turns the first time mark in its chunk into a media fragment (`#t=1262`) that starts playback there.
 5. In the pipeline, a transcriber group handles new episodes as they arrive. A feed's first sync doesn't count, so adding a podcast doesn't queue its whole back catalogue; `npm run transcribe -- -n 5` does those on request.
 
-A 49-minute SED News episode came out at 9,588 words in 18.5 minutes on 2 CPU cores, about 2.6 times faster than real time, using about 1.9 GB of memory. Before the reconnect, the same episode stopped at 9 minutes and was stored as if that were all of it. In an earlier 47-minute episode on software verification, searching "branching timelines after a node crashes to explore different orders of events" landed at 21:02, where the guest walks through it.
+A 49-minute SED News episode came out at 9,588 words in 18.5 minutes on 2 CPU cores, about 2.6 times faster than real time, using about 1.9 GB of memory. Inside the running pipeline, with the embedder and a local model on the same two cores, a 57-minute episode took 24 minutes. Before the reconnect, the same episode stopped at 9 minutes and was stored as if that were all of it. In an earlier 47-minute episode on software verification, searching "branching timelines after a node crashes to explore different orders of events" landed at 21:02, where the guest walks through it.
 
 Moving to transformers.js 4 made Whisper about 30% slower here, and on the same 10 minutes of audio it also found 10% more words, because 3.8 dropped the last seconds of each block.
 
@@ -174,11 +271,16 @@ Tool calling goes through the same gateway as everything else, with the same ret
 
 Llama 3.2 3B on 2 CPU cores answered "What breaks if I upgrade express from 5.0.0 to the latest version?" in about three minutes. It made three tool calls and came back with no breaking changes in 5.1.0 through 5.3.0, no advisories for 5.0.0, and a link to the release notes. The first tries showed what a small model sends: `"to": "latest"` and `"limit": "5"` as a string, so the tools now accept both. Each tool result also opens with a one-line verdict now; before that, the model's answer skipped what the tool had found and suggested searching instead.
 
+On the dashboard's Ask page, a question about lodash 4.17.20 took the agent one tool call and two minutes:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/agent-dark.png">
+  <img alt="The Ask page in agent mode: for lodash 4.17.20 the agent looked up the advisories, then listed five with their severity and links to osv.dev" src="docs/agent.png">
+</picture>
+
 ## The dashboard
 
-`web/` is a Next.js app with two pages. With the API running (`npm run serve`):
-
-![The Live page](docs/dashboard.png)
+`web/` is a Next.js app with two pages, Live (at the top of this README) and Ask. With the API running (`npm run serve`):
 
 ```bash
 cd web
@@ -191,6 +293,11 @@ It talks to `http://localhost:4000/graphql`, from the Next.js server for the fir
 - Live: one line under the title says what matters most right now: the stage that's stuck and the command that unsticks it, or else how quickly new documents turned searchable. Bars for every 10 seconds of the last 15 minutes show what synced; Hacker News, polled every minute, keeps the beat. A bar that lands while its documents are still being embedded is grey and fills in once they're searchable. Below it, each document a sync adds, changes or closes appears as the sync commits, and its Searchable column turns from Waiting to the time it took. Rows embedded before the page opened get that time from the API, which stores when each document's chunks were written. Beside them are the pipeline's stages in the order a document passes through them (sync jobs, outbox, each Kafka consumer, embeddings, dead letters, the index), security alerts as they're raised, each feed's last and next sync, and the model calls of the last week with p95 latency and tokens. Figures are set in Recursive's monospaced style, words in its sans; colour marks only the arriving data and whatever is wrong.
 - Ask: a streamed answer whose `[n]` citations link to their sources, or the agent, which lists its tool calls as it makes them and keeps the conversation for follow-ups. It can also just search.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/ask-dark.png">
+  <img alt="The Ask page: an answer about request collapsing that cites its second source, with the six numbered sources under it and the index's size by source on the right" src="docs/ask.png">
+</picture>
+
 How a change gets to the browser:
 
 1. A sync sends a `NOTIFY` with the ids of its outbox rows, inside the transaction that writes them, so the notification goes out exactly when the change commits and not at all if it rolls back. The embedder does the same when it commits chunks, and the alerts consumer when it commits an alert. Ids go 500 to a notification, under Postgres's 8,000-byte payload limit.
@@ -199,7 +306,7 @@ How a change gets to the browser:
 
 The status, feeds and model usage are polled, every 5 to 60 seconds.
 
-With the pipeline running on the live corpus, a document synced by hand appeared in the browser within 0.3 seconds of starting the sync and was searchable 0.1 seconds after its commit, by way of the relay, Kafka and the embedder. A first poll that brought in 251 Hacker News comments took about a minute to clear, 64 at a time.
+With the pipeline running on the live corpus, a document synced by hand appeared in the browser within 0.3 seconds of starting the sync and was searchable 0.1 seconds after its commit, by way of the relay, Kafka and the embedder. A first poll that brought in 251 Hacker News comments took about a minute to clear, 64 at a time. When the screenshot at the top was taken, after the pipeline had been running for half an hour, new documents were turning searchable a median of 0.8 seconds after their sync.
 
 `cd web && npm test` builds the dashboard and runs Playwright against it and the real API on a Testcontainers Postgres, with stand-in models. The tests check the first render, a sync appearing and turning searchable, a new alert, the page explaining how to start the API while it's down and reconnecting when it's back, and answers, agent follow-ups and search. With the live stream ignored on purpose, the three live tests fail.
 
@@ -217,6 +324,8 @@ npm run pipeline
 - Grafana (http://localhost:3001) opens on the streamrag dashboard: documents synced and embedded per minute, the outbox and embedding backlog, consumer lag, events by outcome, search latency by mode, GraphQL latency by operation, the semantic cache's hit rate, model latency, tokens and errors, and event loop lag and memory.
 - Prometheus (http://localhost:9090) scrapes the API at `:4000/metrics` and the pipeline at `:9465/metrics`. The counters come from prom-client and are counted in whichever process does the work. The backlog gauges are read from Postgres, Kafka and Redis when Prometheus scrapes, so the outbox keeps showing up while the pipeline is down.
 - Jaeger (http://localhost:16686) has the traces. `src/telemetry.ts` is loaded with `--import` before anything else and starts OpenTelemetry with instrumentation for HTTP, fetch, Postgres and Redis. streamrag adds spans for its own work: sync jobs and syncs, relay publishes, consumer batches, embedding, searches (with the query embedding and the rerank inside them), answers, agent runs and tool calls, and every model call.
+
+![An answer's trace in Jaeger: the search, with its query embedding and a 0.9-second rerank, then the model call, which takes most of the 43.5 seconds, and the cache write](docs/jaeger.png)
 
 Three details that took some care:
 
@@ -237,6 +346,8 @@ LANGFUSE_BASE_URL=http://localhost:3030
 Langfuse gets the same OpenTelemetry spans, as OTLP JSON, filtered to the model work: answers, agent runs, tool calls and model calls. Model calls follow OpenTelemetry's GenAI conventions (`gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.prompt`, `gen_ai.completion`), which Langfuse shows as generations with their prompt, reply, tokens and latency. Tool calls show up as tools, and each agent thread becomes a Langfuse session. The self-hosted stack is six containers (web, worker, Postgres, ClickHouse, MinIO and Redis). Langfuse Cloud's free plan works the same way with its own keys and `LANGFUSE_BASE_URL=https://cloud.langfuse.com`.
 
 Checked against Langfuse 4.64 with a local model: an answer arrived as an `answer` span holding one generation with its prompt, reply and token counts, and an agent question about lodash 4.17.20 as an `agent` span in its thread's session, with the model call that chose `security_advisories`, the tool call, and the call that wrote the answer.
+
+![Langfuse's tracing page with an answer open: the answer span holds one generation from llama3.2:3b, 431 tokens, with the system prompt and the numbered sources it was given](docs/langfuse.png)
 
 ### Load testing
 
