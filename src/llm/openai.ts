@@ -1,8 +1,15 @@
 import { sseData } from './sse.ts';
 
-export type Message = { role: 'system' | 'user' | 'assistant'; content: string };
+export type ToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };
+export type Message =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string; tool_calls?: ToolCall[] }
+  | { role: 'tool'; content: string; tool_call_id: string };
 export type Provider = { name: string; baseUrl: string; model: string; apiKey?: string; rpm: number };
-export type ChatEvent = { type: 'token'; text: string } | { type: 'usage'; inputTokens: number; outputTokens: number };
+export type ChatEvent =
+  | { type: 'token'; text: string }
+  | { type: 'tool_calls'; calls: ToolCall[] }
+  | { type: 'usage'; inputTokens: number; outputTokens: number };
 
 export class HttpError extends Error {
   status: number;
@@ -23,7 +30,7 @@ function retryAfter(header: string | null): number | null {
   return Number.isNaN(date) ? null : Math.max(0, date - Date.now());
 }
 
-// Extra request fields, such as response_format for JSON output or a different temperature.
+// Extra request fields: response_format for JSON output, tools for tool calling, a temperature.
 export type ChatOptions = Record<string, unknown>;
 
 // Streams a chat completion from an OpenAI-compatible endpoint. Ollama, Gemini and Groq all offer
@@ -39,11 +46,22 @@ export async function* streamChat(p: Provider, messages: Message[], options: Cha
     // Error bodies are often pretty-printed JSON; one line reads better in a log.
     throw new HttpError(res.status, retryAfter(res.headers.get('retry-after')), (await res.text()).replace(/\s+/g, ' ').slice(0, 200));
   }
+  // Tool calls stream in fragments: the first one for a call carries its id and name, the rest add
+  // to its arguments. They go out whole, once the reply is complete.
+  const calls: ToolCall[] = [];
   for await (const data of sseData(res.body)) {
-    if (data === '[DONE]') return;
+    if (data === '[DONE]') break;
     const chunk = JSON.parse(data);
-    const text = chunk.choices?.[0]?.delta?.content;
-    if (text) yield { type: 'token', text };
+    const delta = chunk.choices?.[0]?.delta;
+    if (delta?.content) yield { type: 'token', text: delta.content };
+    for (const part of delta?.tool_calls ?? []) {
+      const index = part.index ?? calls.length;
+      const call = (calls[index] ??= { id: '', type: 'function', function: { name: '', arguments: '' } });
+      call.id ||= part.id ?? `call_${index}`;
+      call.function.name += part.function?.name ?? '';
+      call.function.arguments += part.function?.arguments ?? '';
+    }
     if (chunk.usage) yield { type: 'usage', inputTokens: chunk.usage.prompt_tokens ?? 0, outputTokens: chunk.usage.completion_tokens ?? 0 };
   }
+  if (calls.length) yield { type: 'tool_calls', calls };
 }

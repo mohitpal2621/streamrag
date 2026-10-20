@@ -146,3 +146,25 @@ test('streamChat turns a 429 into an error that carries Retry-After', async (t) 
     (err) => err instanceof HttpError && err.status === 429 && err.retryAfterMs === 7000,
   );
 });
+
+test('streamChat puts tool calls back together from their streamed fragments', async (t) => {
+  const stream = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"breaking_changes","arguments":""}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"package\\": \\"exp"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ress\\", \\"from\\": \\"4.21.0\\"}"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"name":"search","arguments":"{\\"query\\":\\"x\\"}"}}]}}]}',
+    'data: [DONE]',
+  ].join('\n\n');
+  t.mock.method(globalThis, 'fetch', async () => new Response(`${stream}\n\n`, { status: 200 }));
+  const events: ChatEvent[] = [];
+  for await (const ev of streamChat(provider('x'), messages, { tools: [] })) events.push(ev);
+  assert.deepEqual(events, [
+    {
+      type: 'tool_calls',
+      calls: [
+        { id: 'call_a', type: 'function', function: { name: 'breaking_changes', arguments: '{"package": "express", "from": "4.21.0"}' } },
+        { id: 'call_1', type: 'function', function: { name: 'search', arguments: '{"query":"x"}' } },
+      ],
+    },
+  ]);
+});

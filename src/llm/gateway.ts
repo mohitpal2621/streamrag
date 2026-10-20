@@ -1,4 +1,4 @@
-import { HttpError, streamChat, type ChatEvent, type ChatOptions, type Message, type Provider } from './openai.ts';
+import { HttpError, streamChat, type ChatEvent, type ChatOptions, type Message, type Provider, type ToolCall } from './openai.ts';
 
 export type CallLog = {
   provider: string;
@@ -53,7 +53,8 @@ export function createGateway(o: Options) {
   // Yields the answer's tokens and the provider writing them, trying providers in order. Switching
   // provider is only safe before the first token; after that the answer would repeat itself, so a
   // failure goes to the caller.
-  async function* stream(messages: Message[], options?: ChatOptions): AsyncGenerator<{ provider: string; text: string }> {
+  // A reply with tool calls ends with one chunk that carries them, with empty text.
+  async function* stream(messages: Message[], options?: ChatOptions): AsyncGenerator<{ provider: string; text: string; calls?: ToolCall[] }> {
     const reasons: string[] = [];
     for (const slot of slots) {
       const { p } = slot;
@@ -88,7 +89,7 @@ export function createGateway(o: Options) {
               usage = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
             } else {
               emitted = true;
-              yield { provider: p.name, text: ev.text };
+              yield ev.type === 'token' ? { provider: p.name, text: ev.text } : { provider: p.name, text: '', calls: ev.calls };
             }
           }
           slot.failures = 0;
