@@ -15,4 +15,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test # the store tests start a real Postgres with Testcontainers
+      - run: npm test # Testcontainers starts Postgres, Redpanda and Redis for the store and pipeline tests

@@ -1,5 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
+import { Queue } from 'bullmq';
+import { Redis } from 'ioredis';
 import { connectors } from './connectors/index.ts';
 import { ask } from './core/answer.ts';
 import { embedPending } from './core/embed.ts';
@@ -9,6 +11,9 @@ import { MODES, search } from './core/search.ts';
 import { connect, migrate } from './core/store.ts';
 import { createGateway } from './llm/gateway.ts';
 import { providersFromEnv } from './llm/providers.ts';
+import { deadLetters } from './pipeline/dlq.ts';
+import { brokers, createProducer, DLQ, lag, TOPIC } from './pipeline/kafka.ts';
+import { SYNC_QUEUE } from './pipeline/scheduler.ts';
 import { mergeSources, sourcesForPackageJson } from './track.ts';
 import { breakingChanges } from './upgrade.ts';
 
@@ -22,9 +27,13 @@ const USAGE = `usage:
   npm run usage                         model calls, errors, latency and tokens over the last 7 days
   npm run track -- <package.json>       follow the release notes and security advisories of its dependencies
   npm run eval                          score each search mode on the eval set
+  npm run pipeline                      run the streaming pipeline (see README)
+  npm run status                        pipeline backlog: outbox, Kafka lag, dead letters, sync jobs
+  npm run alerts                        new security advisories the pipeline noticed
+  npm run dlq [-- --replay]             list dead-lettered events, or send them back to be retried
 options:
-  -n, --limit <count>                how many search results to show (default 10)
-  -m, --mode <mode>                  keyword, vector, hybrid or rerank (default rerank)`;
+  -n, --limit <count>                   how many search results to show (default 10)
+  -m, --mode <mode>                     keyword, vector, hybrid or rerank (default rerank)`;
 
 const SOURCES_FILE = new URL('../sources.json', import.meta.url);
 
@@ -33,6 +42,7 @@ const { positionals, values } = parseArgs({
   options: {
     limit: { type: 'string', short: 'n', default: '10' },
     mode: { type: 'string', short: 'm', default: 'rerank' },
+    replay: { type: 'boolean', default: false },
   },
 });
 const [command, arg, ...rest] = positionals;
@@ -158,6 +168,62 @@ try {
       await writeFile(SOURCES_FILE, `${JSON.stringify([...current, ...added], null, 2)}\n`);
       console.log(`added ${added.length} feeds to sources.json; run npm run ingest to sync them`);
       if (noRepo.length) console.log(`no GitHub repo found, so advisories only: ${noRepo.join(', ')}`);
+      break;
+    }
+
+    case 'status': {
+      const { rows } = await db.query<{ outbox: number; oldest: number | null; pending: number; alerts: number }>(
+        `select (select count(*)::int from outbox where published_at is null) as outbox,
+                (select extract(epoch from now() - min(created_at))::int from outbox where published_at is null) as oldest,
+                (select count(*)::int from documents where closed_at is null and embedded_hash is distinct from content_hash) as pending,
+                (select count(*)::int from alerts where created_at > now() - interval '7 days') as alerts`,
+      );
+      const s = rows[0];
+      console.log(`outbox      ${s.outbox} events waiting for the relay${s.oldest ? `, oldest ${s.oldest}s` : ''}`);
+      console.log(`embeddings  ${s.pending} documents waiting`);
+      try {
+        const [embedderLag, alertsLag, dead] = await Promise.all([lag('streamrag-embedder', TOPIC), lag('streamrag-alerts', TOPIC), lag('streamrag-dlq-replay', DLQ)]);
+        console.log(`kafka       embedder behind by ${embedderLag}, alerts behind by ${alertsLag}, ${dead} dead letters not replayed`);
+      } catch (err) {
+        console.log(`kafka       not reachable at ${brokers().join(', ')} (${err instanceof Error ? err.message : err})`);
+      }
+      const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', { maxRetriesPerRequest: 1, connectTimeout: 3_000, lazyConnect: true });
+      redis.on('error', () => {}); // connect() rejects with the same error below; this stops ioredis printing it as well
+      try {
+        await redis.connect();
+        const queue = new Queue(SYNC_QUEUE, { connection: redis });
+        const [counts, scheduled] = await Promise.all([queue.getJobCounts('waiting', 'active', 'delayed', 'failed'), queue.getJobSchedulersCount()]);
+        console.log(`syncs       ${scheduled} sources scheduled; ${counts.waiting} waiting, ${counts.active} running, ${counts.delayed} delayed, ${counts.failed} failed`);
+        await queue.close();
+      } catch (err) {
+        console.log(`syncs       Redis not reachable (${err instanceof Error ? err.message : err})`);
+      } finally {
+        redis.disconnect();
+      }
+      console.log(`alerts      ${s.alerts} new advisories in the last 7 days`);
+      break;
+    }
+
+    case 'alerts': {
+      const { rows } = await db.query<{ at: Date; feed: string; title: string; url: string | null }>(
+        `select a.created_at as at, d.feed, d.title, d.url from alerts a join documents d on d.id = a.document_id
+         order by a.id desc limit $1`,
+        [limit],
+      );
+      if (!rows.length) console.log('no alerts yet; they appear when an advisory is published for a package you track');
+      for (const r of rows) console.log(`${r.at.toISOString().slice(0, 16).replace('T', ' ')}  ${r.feed.replace(/^npm\//, '')}: ${r.title}  ${r.url ?? ''}`);
+      break;
+    }
+
+    case 'dlq': {
+      const producer = values.replay ? createProducer() : null;
+      try {
+        const found = await deadLetters(producer);
+        for (const d of found) console.log(`${d.offset}  ${d.consumer}: ${d.error}\n  ${d.event}`);
+        console.log(values.replay ? `sent ${found.length} events back to ${TOPIC}` : `${found.length} dead letters`);
+      } finally {
+        await producer?.close();
+      }
       break;
     }
 

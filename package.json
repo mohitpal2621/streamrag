@@ -5,7 +5,7 @@
   "description": "Real-time RAG engine: streaming ingestion, hybrid search and AI agents over a live, always-fresh knowledge base.",
   "type": "module",
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.22"
   },
   "scripts": {
     "migrate": "node --env-file-if-exists=.env src/cli.ts migrate",
@@ -17,16 +17,25 @@
     "track": "node --env-file-if-exists=.env src/cli.ts track",
     "eval": "node --env-file-if-exists=.env src/eval.ts",
     "eval:llm": "node eval/llm/setup.ts && node --env-file-if-exists=.env eval/llm/run.ts",
+    "pipeline": "node --env-file-if-exists=.env src/pipeline/run.ts",
+    "status": "node --env-file-if-exists=.env src/cli.ts status",
+    "alerts": "node --env-file-if-exists=.env src/cli.ts alerts",
+    "dlq": "node --env-file-if-exists=.env src/cli.ts dlq",
     "typecheck": "tsc",
     "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "@platformatic/kafka": "^2.14.0",
+    "bullmq": "^6.3.17",
     "fast-xml-parser": "^5.11.2",
+    "ioredis": "^6.0.0",
     "pg": "^8.23.1"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^12.2.1",
+    "@testcontainers/redis": "^12.2.1",
+    "@testcontainers/redpanda": "^12.2.1",
     "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
     "typescript": "^7.0.2"

@@ -23,14 +23,17 @@ const contentHash = (d: Doc) =>
 // Inserts new documents and updates changed ones; unchanged documents keep their updated_at.
 // closeMissing is for snapshot feeds, which list everything that exists, so whatever they stop
 // listing is gone. Append-only feeds (RSS, Hacker News) just roll old items off; those stay open.
-// shortcut: assumes one sync per feed at a time; two concurrent syncs of the same feed need a lock.
+// Expects one sync per feed at a time. The pipeline's sync worker holds a Redis lock per feed for
+// that; npm run ingest assumes the pipeline isn't running alongside it.
 export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: Doc[], closeMissing = true) {
   const rows = [...new Map(docs.map((d) => [d.externalId, d])).values()]; // one upsert can't touch a row twice
   const client = await db.connect();
   try {
     await client.query('begin');
+    // A feed's first sync isn't news: those advisories existed before streamrag looked.
+    const initial = !(await client.query('select 1 from documents where source = $1 and feed = $2 limit 1', [source, feed])).rowCount;
     // now() is fixed for the whole transaction, so "= now()" marks rows written by this sync.
-    const upserted = await client.query<{ inserted: boolean; changed: boolean }>(
+    const upserted = await client.query<{ id: string; content_hash: string; inserted: boolean; changed: boolean }>(
       `insert into documents (source, feed, external_id, title, url, body, meta, content_hash)
        select $1::text, $2::text, * from unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::jsonb[], $8::text[])
        on conflict (source, feed, external_id) do update set
@@ -39,7 +42,7 @@ export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: 
          updated_at = case when documents.content_hash = excluded.content_hash then documents.updated_at else now() end,
          last_seen_at = now(),
          closed_at = null
-       returning first_seen_at = now() as inserted, updated_at = now() as changed`,
+       returning id, content_hash, first_seen_at = now() as inserted, updated_at = now() as changed`,
       [
         source,
         feed,
@@ -52,12 +55,24 @@ export async function syncFeed(db: pg.Pool, source: string, feed: string, docs: 
       ],
     );
     const closed = closeMissing
-      ? await client.query(
+      ? await client.query<{ id: string; content_hash: string }>(
           `update documents set closed_at = now()
-           where source = $1 and feed = $2 and closed_at is null and last_seen_at < now()`,
+           where source = $1 and feed = $2 and closed_at is null and last_seen_at < now()
+           returning id, content_hash`,
           [source, feed],
         )
       : null;
+    const events = [
+      ...upserted.rows.filter((r) => r.changed).map((r) => ({ type: 'document.changed', documentId: r.id, contentHash: r.content_hash, inserted: r.inserted })),
+      ...(closed?.rows ?? []).map((r) => ({ type: 'document.closed', documentId: r.id, contentHash: r.content_hash, inserted: false })),
+    ].map((e) => ({ ...e, source, feed, initial }));
+    if (events.length) {
+      await client.query('insert into outbox (key, payload) select * from unnest($1::text[], $2::jsonb[])', [
+        events.map((e) => e.documentId),
+        events.map((e) => JSON.stringify(e)),
+      ]);
+      await client.query("select pg_notify('outbox', '')"); // delivered on commit, so the relay wakes at once
+    }
     await client.query('commit');
     const inserted = upserted.rows.filter((r) => r.inserted).length;
     const updated = upserted.rows.filter((r) => !r.inserted && r.changed).length;

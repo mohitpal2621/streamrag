@@ -77,3 +77,31 @@ create table if not exists llm_calls (
   output_tokens int,
   created_at    timestamptz not null default now()
 );
+
+-- Transactional outbox. A sync writes one event per document it adds, changes or closes in the same
+-- transaction as the change, so an event exists exactly when the change committed. The relay
+-- publishes unpublished rows to Kafka and prunes published ones after a day.
+create table if not exists outbox (
+  id           bigserial primary key,
+  key          text not null,   -- Kafka message key: the document id, so one document's events stay in order
+  payload      jsonb not null,
+  created_at   timestamptz not null default now(),
+  published_at timestamptz
+);
+
+create index if not exists outbox_unpublished_idx on outbox (id) where published_at is null;
+
+-- Effects a consumer must apply only once, recorded in the same transaction as the effect.
+create table if not exists processed_events (
+  consumer   text not null,
+  event_key  text not null,
+  created_at timestamptz not null default now(),
+  primary key (consumer, event_key)
+);
+
+-- Security advisories that showed up after their feed's first sync.
+create table if not exists alerts (
+  id          bigserial primary key,
+  document_id bigint not null references documents (id) on delete cascade,
+  created_at  timestamptz not null default now()
+);
