@@ -17,3 +17,26 @@ jobs:
       - run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg)
       - run: npm run typecheck
       - run: npm test # Testcontainers starts Postgres, Redpanda and Redis for the store and pipeline tests
+
+  dashboard:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: 1
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - run: npm ci
+        working-directory: .
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run typecheck
+      - run: npm test # the real API on a Testcontainers Postgres, the built dashboard, and Chromium
